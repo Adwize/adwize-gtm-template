@@ -3,3 +3,5 @@ documentation: "https://docs.getadwize.com/integrations/google-tag-manager"
 versions:
   - sha: e32617355361035029e0557df786304d3dc0f3e0
     changeNotes: Initial release with event monitoring, trigger modes, and 7 unit tests.
+  - sha: 16d1eb9d99d86b15f1acffcd40ac5eb99bab11a8
+    changeNotes: Test coverage and sendPixel method.
