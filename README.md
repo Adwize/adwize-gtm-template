@@ -4,8 +4,8 @@ Monitor data quality at the source. This Google Tag Manager template captures al
 
 ## What it does
 
-- Listens to every GTM event via `addEventCallback`
-- Captures which tags fired, their status, and execution time
+- Captures dataLayer events (e.g. `page_view`, `purchase`) as they occur
+- Collects e-commerce data, transaction details, and container metadata
 - Sends a lightweight pixel request (`GET`) to the Adwize API
 - Supports filtering by all events, e-commerce only, or a custom event list
 
@@ -34,16 +34,16 @@ Monitor data quality at the source. This Google Tag Manager template captures al
 ```
 User visits page
   → GTM fires event (e.g. page_view, purchase)
-    → Adwize tag calls addEventCallback
-      → Callback receives tag firing data
-        → Builds JSON payload (event, tags, metadata)
+    → Adwize tag reads event from dataLayer
+      → Collects e-commerce data, transaction details, container metadata
+        → Builds JSON payload (event, data, metadata)
           → sendPixel GET request to Adwize API
             → Adwize processes and monitors data quality
 ```
 
 ## Tests
 
-The template includes 7 unit tests covering all trigger modes, edge cases (no tags, filtered events), and URL construction. After importing, open the template editor > **Tests** tab > click **Run Tests** to validate.
+The template includes 8 unit tests covering all trigger modes, edge cases (null events, filtered events), and URL construction. After importing, open the template editor > **Tests** tab > click **Run Tests** to validate.
 
 ## Support
 

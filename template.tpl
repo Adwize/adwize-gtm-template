@@ -586,7 +586,8 @@ Setup:
 6. Publish your container
 
 Tests:
-The template includes 8 unit tests. After importing, go to the
+The template includes 8 unit tests covering all trigger modes,
+edge cases, and URL construction. After importing, go to the
 template editor > Tests tab and click "Run Tests" to validate.
 
 For support: support@getadwize.com
