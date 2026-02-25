@@ -1,0 +1,5 @@
+homepage: "https://getadwize.com"
+documentation: "https://docs.getadwize.com/integrations/google-tag-manager"
+versions:
+  - sha: REPLACE_WITH_COMMIT_SHA
+    changeNotes: Initial release with event monitoring, trigger modes, and 7 unit tests.
