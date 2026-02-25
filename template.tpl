@@ -115,7 +115,6 @@ ___TEMPLATE_PARAMETERS___
 
 ___SANDBOXED_JS_FOR_WEB_TEMPLATE___
 
-const addEventCallback = require('addEventCallback');
 const copyFromDataLayer = require('copyFromDataLayer');
 const copyFromWindow = require('copyFromWindow');
 const encodeUriComponent = require('encodeUriComponent');
@@ -125,7 +124,6 @@ const JSON = require('JSON');
 const sendPixel = require('sendPixel');
 const getUrl = require('getUrl');
 const log = require('logToConsole');
-const makeString = require('makeString');
 
 // =============================================================================
 // CONFIGURATION
@@ -157,6 +155,8 @@ const debugLog = function(message, payload) {
 };
 
 const shouldCaptureEvent = function(eventName) {
+  if (!eventName) return false;
+
   if (triggerMode === 'all') return true;
 
   if (triggerMode === 'ecommerce') {
@@ -202,75 +202,54 @@ if (!shouldCaptureEvent(eventName)) {
   return;
 }
 
-addEventCallback(function(containerId, eventData) {
+var ecommerceData = getEcommerceData();
+var fullDataLayer = captureDataLayer ? copyFromWindow('dataLayer') : null;
 
-  var tags = eventData.tags.filter(function(t) { return t.exclude !== 'true'; });
+var eventDataObj = {
+  event: eventName
+};
 
-  if (tags.length === 0) {
-    debugLog('No tags to report for event: ' + eventName);
-    return;
-  }
+if (ecommerceData) {
+  eventDataObj.ecommerce = ecommerceData;
+}
 
-  var ecommerceData = getEcommerceData();
-  var fullDataLayer = captureDataLayer ? copyFromWindow('dataLayer') : null;
+var transactionId = copyFromDataLayer('transaction_id') || copyFromDataLayer('transactionId');
+var value = copyFromDataLayer('value');
+var currency = copyFromDataLayer('currency');
 
-  var eventDataObj = {
-    event: eventName
-  };
+if (transactionId) eventDataObj.transaction_id = transactionId;
+if (value !== undefined) eventDataObj.value = value;
+if (currency) eventDataObj.currency = currency;
 
-  if (ecommerceData) {
-    eventDataObj.ecommerce = ecommerceData;
-  }
+if (fullDataLayer) {
+  eventDataObj.dataLayer = fullDataLayer;
+}
 
-  var transactionId = copyFromDataLayer('transaction_id') || copyFromDataLayer('transactionId');
-  var value = copyFromDataLayer('value');
-  var currency = copyFromDataLayer('currency');
+var payload = {
+  source: 'gtm',
+  source_id: cv.containerId,
+  events: [{
+    type: eventName,
+    timestamp: timestamp,
+    data: eventDataObj,
+    metadata: {
+      container_id: cv.containerId,
+      container_version: cv.version,
+      environment: cv.environmentName || 'live',
+      page_url: pageUrl
+    }
+  }]
+};
 
-  if (transactionId) eventDataObj.transaction_id = transactionId;
-  if (value !== undefined) eventDataObj.value = value;
-  if (currency) eventDataObj.currency = currency;
+debugLog('Sending payload:', payload);
 
-  if (fullDataLayer) {
-    eventDataObj.dataLayer = fullDataLayer;
-  }
+var jsonStr = JSON.stringify(payload);
+var url = ENDPOINT + '?k=' + encodeUriComponent(apiKey) + '&d=' + encodeUriComponent(jsonStr);
 
-  var tagList = [];
-  for (var i = 0; i < tags.length; i++) {
-    tagList.push({
-      id: makeString(tags[i].id),
-      name: tags[i].name,
-      status: tags[i].status,
-      execution_time_ms: tags[i].executionTime
-    });
-  }
-
-  var payload = {
-    source: 'gtm',
-    source_id: containerId,
-    events: [{
-      type: eventName,
-      timestamp: timestamp,
-      data: eventDataObj,
-      metadata: {
-        container_id: containerId,
-        container_version: cv.version,
-        environment: cv.environmentName || 'live',
-        page_url: pageUrl,
-        tags: tagList
-      }
-    }]
-  };
-
-  debugLog('Sending payload:', payload);
-
-  var jsonStr = JSON.stringify(payload);
-  var url = ENDPOINT + '?k=' + encodeUriComponent(apiKey) + '&d=' + encodeUriComponent(jsonStr);
-
-  sendPixel(url, function() {
-    debugLog('Event sent successfully: ' + eventName);
-  }, function() {
-    debugLog('Failed to send event: ' + eventName);
-  });
+sendPixel(url, function() {
+  debugLog('Event sent successfully: ' + eventName);
+}, function() {
+  debugLog('Failed to send event: ' + eventName);
 });
 
 data.gtmOnSuccess();
@@ -411,16 +390,6 @@ ___WEB_PERMISSIONS___
   {
     "instance": {
       "key": {
-        "publicId": "read_event_metadata",
-        "versionId": "1"
-      },
-      "param": []
-    },
-    "isRequired": true
-  },
-  {
-    "instance": {
-      "key": {
         "publicId": "send_pixel",
         "versionId": "1"
       },
@@ -454,20 +423,17 @@ ___WEB_PERMISSIONS___
 ___TESTS___
 
 scenarios:
-- name: "All events mode - gtmOnSuccess is called"
+- name: "All events mode sends pixel for page_view"
   code: |-
     mock('copyFromDataLayer', function(key) {
       if (key === 'event') return 'page_view';
       return undefined;
     });
     mock('getContainerVersion', function() {
-      return {version: '1', environmentName: 'live'};
+      return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
     });
     mock('getTimestampMillis', function() { return 1700000000000; });
     mock('getUrl', function() { return 'https://example.com/page'; });
-    mock('addEventCallback', function(callback) {
-      callback('GTM-TEST1', {tags: [{id: '1', name: 'GA4', status: 'success', executionTime: 50, exclude: 'false'}]});
-    });
     mock('sendPixel', function(url, onSuccess, onFailure) {
       onSuccess();
     });
@@ -475,14 +441,15 @@ scenarios:
     runCode({apiKey: 'ts_live_test123', triggerMode: 'all', debugMode: false, captureDataLayer: false, captureEcommerceItems: true});
 
     assertApi('gtmOnSuccess').wasCalled();
-- name: "Skipped event in ecommerce mode calls gtmOnSuccess without sendPixel"
+    assertApi('sendPixel').wasCalled();
+- name: "Skipped event in ecommerce mode - no pixel sent"
   code: |-
     mock('copyFromDataLayer', function(key) {
       if (key === 'event') return 'page_view';
       return undefined;
     });
     mock('getContainerVersion', function() {
-      return {version: '1', environmentName: 'live'};
+      return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
     });
     mock('getTimestampMillis', function() { return 1700000000000; });
     mock('getUrl', function() { return 'https://example.com/page'; });
@@ -499,13 +466,10 @@ scenarios:
       return undefined;
     });
     mock('getContainerVersion', function() {
-      return {version: '1', environmentName: 'live'};
+      return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
     });
     mock('getTimestampMillis', function() { return 1700000000000; });
     mock('getUrl', function() { return 'https://example.com/checkout'; });
-    mock('addEventCallback', function(callback) {
-      callback('GTM-TEST1', {tags: [{id: '1', name: 'GA4', status: 'success', executionTime: 50, exclude: 'false'}]});
-    });
     mock('sendPixel', function(url, onSuccess, onFailure) {
       onSuccess();
     });
@@ -521,7 +485,7 @@ scenarios:
       return undefined;
     });
     mock('getContainerVersion', function() {
-      return {version: '1', environmentName: 'live'};
+      return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
     });
     mock('getTimestampMillis', function() { return 1700000000000; });
     mock('getUrl', function() { return 'https://example.com/page'; });
@@ -537,13 +501,10 @@ scenarios:
       return undefined;
     });
     mock('getContainerVersion', function() {
-      return {version: '1', environmentName: 'live'};
+      return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
     });
     mock('getTimestampMillis', function() { return 1700000000000; });
     mock('getUrl', function() { return 'https://example.com/checkout'; });
-    mock('addEventCallback', function(callback) {
-      callback('GTM-TEST1', {tags: [{id: '1', name: 'GA4', status: 'success', executionTime: 50, exclude: 'false'}]});
-    });
     mock('sendPixel', function(url, onSuccess, onFailure) {
       onSuccess();
     });
@@ -552,7 +513,7 @@ scenarios:
 
     assertApi('gtmOnSuccess').wasCalled();
     assertApi('sendPixel').wasCalled();
-- name: "sendPixel URL contains API key and endpoint"
+- name: "sendPixel URL contains API key"
   code: |-
     var capturedUrl = '';
     mock('copyFromDataLayer', function(key) {
@@ -560,13 +521,10 @@ scenarios:
       return undefined;
     });
     mock('getContainerVersion', function() {
-      return {version: '1', environmentName: 'live'};
+      return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
     });
     mock('getTimestampMillis', function() { return 1700000000000; });
     mock('getUrl', function() { return 'https://example.com/page'; });
-    mock('addEventCallback', function(callback) {
-      callback('GTM-TEST1', {tags: [{id: '1', name: 'Tag1', status: 'success', executionTime: 10, exclude: 'false'}]});
-    });
     mock('sendPixel', function(url, onSuccess, onFailure) {
       capturedUrl = url;
       onSuccess();
@@ -574,21 +532,36 @@ scenarios:
 
     runCode({apiKey: 'ts_live_testkey', triggerMode: 'all', debugMode: false, captureDataLayer: false, captureEcommerceItems: true});
 
-    assertThat(capturedUrl).isNotEqualTo('');
-- name: "No tags to report - sendPixel not called"
+    assertThat(capturedUrl).contains('ts_live_testkey');
+- name: "GTM lifecycle events are captured in all mode"
   code: |-
     mock('copyFromDataLayer', function(key) {
-      if (key === 'event') return 'page_view';
+      if (key === 'event') return 'gtm.js';
       return undefined;
     });
     mock('getContainerVersion', function() {
-      return {version: '1', environmentName: 'live'};
+      return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
     });
     mock('getTimestampMillis', function() { return 1700000000000; });
     mock('getUrl', function() { return 'https://example.com/page'; });
-    mock('addEventCallback', function(callback) {
-      callback('GTM-TEST1', {tags: []});
+    mock('sendPixel', function(url, onSuccess, onFailure) {
+      onSuccess();
     });
+
+    runCode({apiKey: 'ts_live_test123', triggerMode: 'all', debugMode: false, captureDataLayer: false, captureEcommerceItems: true});
+
+    assertApi('gtmOnSuccess').wasCalled();
+    assertApi('sendPixel').wasCalled();
+- name: "Null event name is filtered out"
+  code: |-
+    mock('copyFromDataLayer', function(key) {
+      return undefined;
+    });
+    mock('getContainerVersion', function() {
+      return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
+    });
+    mock('getTimestampMillis', function() { return 1700000000000; });
+    mock('getUrl', function() { return 'https://example.com/page'; });
 
     runCode({apiKey: 'ts_live_test123', triggerMode: 'all', debugMode: false, captureDataLayer: false, captureEcommerceItems: true});
 
@@ -613,7 +586,7 @@ Setup:
 6. Publish your container
 
 Tests:
-The template includes 7 unit tests. After importing, go to the
+The template includes 8 unit tests. After importing, go to the
 template editor > Tests tab and click "Run Tests" to validate.
 
 For support: support@getadwize.com
