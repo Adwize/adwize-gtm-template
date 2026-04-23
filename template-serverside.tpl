@@ -127,7 +127,7 @@ const log = require('logToConsole');
 // CONFIGURATION
 // =============================================================================
 
-const ENDPOINT = 'https://api.getadwize.com/api/v1/events/collect';
+const ENDPOINT = 'https://api.getadwize.com/api/v1/events';
 const apiKey = data.apiKey;
 const triggerMode = data.triggerMode || 'all';
 const customEvents = data.customEvents || '';
@@ -172,6 +172,18 @@ const shouldCaptureEvent = function(eventName) {
   return false;
 };
 
+const getEcommerceData = function() {
+  if (!captureEcommerceItems) return null;
+
+  const ecommerce = getEventData('ecommerce');
+  if (ecommerce) return ecommerce;
+
+  const items = getEventData('items');
+  if (items) return {items: items};
+
+  return null;
+};
+
 // =============================================================================
 // MAIN LOGIC
 // =============================================================================
@@ -193,12 +205,10 @@ var eventDataObj = {
   event: eventName
 };
 
-if (captureEcommerceItems) {
-  var items = getEventData('items');
-  if (items) eventDataObj.items = items;
-}
+var ecommerceData = getEcommerceData();
+if (ecommerceData) eventDataObj.ecommerce = ecommerceData;
 
-var transactionId = getEventData('transaction_id');
+var transactionId = getEventData('transaction_id') || getEventData('transactionId');
 var value = getEventData('value');
 var currency = getEventData('currency');
 
@@ -232,7 +242,7 @@ const requestOptions = {
   method: 'POST',
   headers: {
     'Content-Type': 'application/json',
-    'X-Adwize-Api-Key': apiKey
+    'X-Api-Key': apiKey
   },
   timeout: 5000
 };
@@ -442,7 +452,7 @@ scenarios:
 
     runCode({apiKey: 'ts_live_testkey', triggerMode: 'all', debugMode: false, captureFullEvent: false, captureEcommerceItems: true});
 
-    assertThat(capturedOptions.headers['X-Adwize-Api-Key']).isEqualTo('ts_live_testkey');
+    assertThat(capturedOptions.headers['X-Api-Key']).isEqualTo('ts_live_testkey');
 - name: "Request body is valid JSON containing the event name"
   code: |-
     var capturedBody = '';
