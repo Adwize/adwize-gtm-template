@@ -21,11 +21,13 @@ It does **not** report whether other GTM tags (GA4, Ads, etc.) fired successfull
 5. **Add a trigger**: select **All Pages**
 6. **Preview** to verify events are sent, then **Publish**
 
+> **Security note:** The collect request is a GET pixel, so the API key travels in the query string (`?k=`). That can appear in browser history, CDN/proxy/WAF logs, and some error-page referrers. Prefer network controls, rotate the key if logs are shared, and treat this as write-ingest credentials — not a dashboard login.
+
 ## Configuration Fields
 
 | Field | Description |
 |---|---|
-| **API Key** | Your Adwize tenant API key (required) |
+| **API Key** | Your Adwize tenant API key (required). Sent in the collect URL query string — see security note above. |
 | **When to Send Data** | `All Events` (default), `E-commerce Events Only`, or `Custom Event List` |
 | **Custom Events** | Comma-separated event names (only shown when Custom is selected) |
 | **Capture full dataLayer** | Include the entire dataLayer snapshot in each event (Advanced). Large snapshots can exceed GET URL limits — see below. |
