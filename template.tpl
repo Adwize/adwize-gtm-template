@@ -20,7 +20,7 @@ ___INFO___
     "id": "data_quality",
     "displayName": "Adwize"
   },
-  "description": "Monitor data quality at the source. Captures all dataLayer events and tag firing status for quality monitoring and alerting.",
+  "description": "Monitor data quality at the source. Captures dataLayer events (event name, optional e-commerce/items, optional full dataLayer snapshot, container metadata) for quality monitoring and alerting. Does not report whether other GTM tags fired.",
   "containerContexts": [
     "WEB"
   ]
@@ -90,7 +90,7 @@ ___TEMPLATE_PARAMETERS___
         "checkboxText": "Capture full dataLayer snapshot",
         "simpleValueType": true,
         "defaultValue": false,
-        "help": "Include complete dataLayer in each event. Useful for debugging but increases payload size."
+        "help": "Include complete dataLayer in each event. Useful for debugging but increases payload size. Large snapshots can exceed GET URL limits and drop events silently; prefer e-commerce-only or custom lists when possible."
       },
       {
         "type": "CHECKBOX",
@@ -574,8 +574,13 @@ ___NOTES___
 Adwize Data Quality Monitor GTM Tag Template
 =============================================
 
-This tag captures dataLayer events and tag firing status,
-sending them to the Adwize API for quality monitoring and alerting.
+This tag captures dataLayer events (event name, optional
+e-commerce data, optional full dataLayer snapshot, and
+container metadata) and forwards them to the Adwize API for
+quality monitoring and alerting.
+
+It does not report whether other GTM tags (GA4, Ads, etc.)
+fired successfully — only the dataLayer events this tag observes.
 
 Setup:
 1. Import this template into GTM (Templates > Tag Templates > New > Import)
