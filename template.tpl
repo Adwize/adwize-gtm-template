@@ -246,10 +246,19 @@ debugLog('Sending payload:', payload);
 var jsonStr = JSON.stringify(payload);
 var url = ENDPOINT + '?k=' + encodeUriComponent(apiKey) + '&d=' + encodeUriComponent(jsonStr);
 
+// GET collect URLs fail silently past ~2k–8k chars. Skip send and always log.
+var MAX_PIXEL_URL_LENGTH = 1800;
+if (url.length > MAX_PIXEL_URL_LENGTH) {
+  log('[Adwize] Payload too large for collect pixel (' + url.length +
+      ' chars). Skipping send. Turn off full dataLayer or reduce ecommerce items.');
+  data.gtmOnSuccess();
+  return;
+}
+
 sendPixel(url, function() {
   debugLog('Event sent successfully: ' + eventName);
 }, function() {
-  debugLog('Failed to send event: ' + eventName);
+  log('[Adwize] Failed to send event: ' + eventName);
 });
 
 data.gtmOnSuccess();
@@ -567,6 +576,33 @@ scenarios:
 
     assertApi('gtmOnSuccess').wasCalled();
     assertApi('sendPixel').wasNotCalled();
+- name: "Oversize payload skips sendPixel and still succeeds"
+  code: |-
+    mock('copyFromDataLayer', function(key) {
+      if (key === 'event') return 'page_view';
+      return undefined;
+    });
+    mock('copyFromWindow', function(key) {
+      if (key === 'dataLayer') {
+        var big = [];
+        for (var i = 0; i < 400; i++) {
+          big.push({i: i, pad: 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'});
+        }
+        return big;
+      }
+      return undefined;
+    });
+    mock('getContainerVersion', function() {
+      return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
+    });
+    mock('getTimestampMillis', function() { return 1700000000000; });
+    mock('getUrl', function() { return 'https://example.com/page'; });
+
+    runCode({apiKey: 'ts_live_test123', triggerMode: 'all', debugMode: false, captureDataLayer: true, captureEcommerceItems: true});
+
+    assertApi('gtmOnSuccess').wasCalled();
+    assertApi('sendPixel').wasNotCalled();
+    assertApi('logToConsole').wasCalled();
 
 
 ___NOTES___
@@ -591,7 +627,7 @@ Setup:
 6. Publish your container
 
 Tests:
-The template includes 8 unit tests covering all trigger modes,
+The template includes 9 unit tests covering all trigger modes,
 edge cases, and URL construction. After importing, go to the
 template editor > Tests tab and click "Run Tests" to validate.
 
