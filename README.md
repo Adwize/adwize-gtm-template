@@ -52,7 +52,7 @@ User visits page
 
 ## Tests
 
-The template includes 8 unit tests covering all trigger modes, edge cases (null events, filtered events), and URL construction. After importing, open the template editor > **Tests** tab > click **Run Tests** to validate.
+The template includes 9 unit tests covering all trigger modes, edge cases (null events, filtered events), and URL construction. After importing, open the template editor > **Tests** tab > click **Run Tests** to validate.
 
 ## Support
 

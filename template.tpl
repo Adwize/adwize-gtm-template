@@ -35,7 +35,7 @@ ___TEMPLATE_PARAMETERS___
     "name": "apiKey",
     "displayName": "API Key",
     "simpleValueType": true,
-    "help": "Your Adwize API key. Find it in the Adwize dashboard under Settings → API Keys.",
+    "help": "Your Adwize API key. Find it in the Adwize dashboard under Settings → API Keys. The key is sent in the collect URL query string and can appear in browser history or CDN/proxy logs — rotate it if logs are shared.",
     "valueValidators": [
       {
         "type": "NON_EMPTY"
