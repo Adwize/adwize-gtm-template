@@ -36,7 +36,7 @@ It does **not** report whether other GTM tags (GA4, Ads, etc.) fired successfull
 
 ## Payload size (GET URL limits)
 
-Events are sent as a `GET` pixel with the JSON payload in the query string. Large payloads — especially with **Capture full dataLayer** enabled, or large e-commerce `items` arrays — can exceed typical browser/proxy URL length limits (~2k–8k characters). When that happens, the request may fail silently unless debug logging is enabled. Prefer e-commerce-only or a custom event list when possible, and leave full dataLayer capture off unless you need it for debugging.
+Events are sent as a `GET` pixel with the JSON payload in the query string. Large payloads — especially with **Capture full dataLayer** enabled, or large e-commerce `items` arrays — can exceed typical browser/proxy URL length limits (~2k–8k characters). When the collect URL exceeds ~1800 characters, the tag skips `sendPixel` and always logs to the console (`[Adwize] Payload too large…`), even when debug logging is off. Prefer e-commerce-only or a custom event list when possible, and leave full dataLayer capture off unless you need it for debugging.
 
 ## How it works
 

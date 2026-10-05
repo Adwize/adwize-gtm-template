@@ -90,7 +90,7 @@ ___TEMPLATE_PARAMETERS___
         "checkboxText": "Capture full dataLayer snapshot",
         "simpleValueType": true,
         "defaultValue": false,
-        "help": "Include complete dataLayer in each event. Useful for debugging but increases payload size. Large snapshots can exceed GET URL limits and drop events silently; prefer e-commerce-only or custom lists when possible."
+        "help": "Include complete dataLayer in each event. Useful for debugging but increases payload size. Large snapshots can exceed GET URL limits (~1800 chars); those events are skipped and always logged to the console, even when debug logging is off. Prefer e-commerce-only or custom lists when possible."
       },
       {
         "type": "CHECKBOX",
