@@ -1,6 +1,8 @@
 homepage: "https://getadwize.com"
 documentation: "https://docs.getadwize.com/integrations/google-tag-manager"
 versions:
+  - sha: 14bc7088bfca463c1745e0e1f9d69d5bc071db10
+    changeNotes: Skip and always log oversize collect requests; clarify apiKey query-string handling and README/help copy.
   - sha: 16d1eb9d99d86b15f1acffcd40ac5eb99bab11a8
     changeNotes: Test coverage and sendPixel method.
   - sha: e32617355361035029e0557df786304d3dc0f3e0
