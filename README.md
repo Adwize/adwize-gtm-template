@@ -18,7 +18,7 @@ It does **not** report whether other GTM tags (GA4, Ads, etc.) fired successfull
 2. **Create a tag**: **Tags** > **New** > choose **Adwize - Data collection monitoring**
 3. **Paste your API key** from the Adwize dashboard (**Settings > API Keys**)
 4. **Choose a trigger mode**: All Events (recommended), E-commerce Only, or Custom Event List
-5. **Add a trigger**: select **All Pages**
+5. **Add a trigger**: create a **Custom Event** trigger with Event name `.*` and **Use regex matching** checked (fires on all custom events, including `gtm.js`). The tag's **When to Send Data** setting (`All Events (Recommended)`, `E-commerce Events Only`, or `Custom Event List`) filters which events are sent, so this broad trigger is expected.
 6. **Preview** to verify events are sent, then **Publish**
 
 > **Security note:** The collect request is a GET pixel, so the API key travels in the query string (`?k=`). That can appear in browser history, CDN/proxy/WAF logs, and some error-page referrers. Prefer network controls, rotate the key if logs are shared, and treat this as write-ingest credentials — not a dashboard login.
