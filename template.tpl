@@ -622,7 +622,11 @@ Setup:
 1. Import this template into GTM (Templates > Tag Templates > New > Import)
 2. Create a new tag using this template (Tags > New > select "Adwize")
 3. Enter your API key from the Adwize dashboard (Settings > API Keys)
-4. Set trigger to "All Pages"
+4. Add a Custom Event trigger with Event name ".*" and "Use regex matching"
+   checked (fires on all custom events, including gtm.js). The tag's
+   "When to Send Data" setting (All Events (Recommended), E-commerce
+   Events Only, or Custom Event List) filters which events are sent,
+   so this broad trigger is expected.
 5. Preview to verify events are sent
 6. Publish your container
 
