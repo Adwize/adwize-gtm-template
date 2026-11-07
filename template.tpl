@@ -20,7 +20,7 @@ ___INFO___
     "id": "data_quality",
     "displayName": "Adwize"
   },
-  "description": "Monitor data quality at the source. Captures dataLayer events (event name, optional e-commerce/items, optional full dataLayer snapshot, container metadata) for quality monitoring and alerting. Does not report whether other GTM tags fired.",
+  "description": "Monitor data quality at the source. Captures dataLayer events (event name, optional e-commerce/items, optional full dataLayer snapshot, container metadata) for quality monitoring and alerting. Optionally reports the status of GTM tags you mark with tag metadata.",
   "containerContexts": [
     "WEB"
   ]
@@ -109,21 +109,40 @@ ___TEMPLATE_PARAMETERS___
         "help": "Log events to browser console. Disable in production."
       }
     ]
+  },
+  {
+    "type": "GROUP",
+    "name": "tagMonitoring",
+    "displayName": "Tag Monitoring",
+    "groupStyle": "ZIPPY_CLOSED",
+    "subParams": [
+      {
+        "type": "CHECKBOX",
+        "name": "monitorTags",
+        "checkboxText": "Report status of monitored tags",
+        "simpleValueType": true,
+        "defaultValue": false,
+        "help": "After each event this tag fires on, send the status (success, failure, exception, timeout) and execution time of the tags that fired for that event and carry the metadata monitor = true (Advanced Settings > Additional Tag Metadata; check Include Tag Name with key name to report tag names). Runs on every event this tag fires on, regardless of When to Send Data."
+      }
+    ]
   }
 ]
 
 
 ___SANDBOXED_JS_FOR_WEB_TEMPLATE___
 
+const addEventCallback = require('addEventCallback');
 const copyFromDataLayer = require('copyFromDataLayer');
 const copyFromWindow = require('copyFromWindow');
 const encodeUriComponent = require('encodeUriComponent');
+const generateRandom = require('generateRandom');
 const getContainerVersion = require('getContainerVersion');
 const getTimestampMillis = require('getTimestampMillis');
 const JSON = require('JSON');
 const sendPixel = require('sendPixel');
 const getUrl = require('getUrl');
 const log = require('logToConsole');
+const templateStorage = require('templateStorage');
 
 // =============================================================================
 // CONFIGURATION
@@ -136,6 +155,13 @@ const customEvents = data.customEvents || '';
 const captureDataLayer = data.captureDataLayer || false;
 const captureEcommerceItems = data.captureEcommerceItems !== false;
 const debugMode = data.debugMode || false;
+const monitorTags = data.monitorTags || false;
+
+const MONITOR_METADATA_KEY = 'monitor';
+const TAG_STATUS_EVENT_TYPE = 'adwize.tag_status';
+
+// GET collect URLs fail silently past ~2k–8k chars. Skip send and always log.
+const MAX_PIXEL_URL_LENGTH = 1800;
 
 const ecommerceEvents = [
   'purchase', 'transaction', 'add_to_cart', 'remove_from_cart',
@@ -186,15 +212,91 @@ const getEcommerceData = function() {
   return null;
 };
 
+const getMonitoredTags = function(tags) {
+  const monitored = [];
+  if (!tags) return monitored;
+  for (var i = 0; i < tags.length; i++) {
+    if (tags[i][MONITOR_METADATA_KEY] === 'true') {
+      monitored.push({
+        id: tags[i].id,
+        name: tags[i].name,
+        status: tags[i].status,
+        execution_time: tags[i].executionTime
+      });
+    }
+  }
+  return monitored;
+};
+
+// gtm.uniqueEventId restarts on every page load: pair it with an id shared by
+// every event of the page so the backend can join an event with its tag statuses.
+const getPageLoadId = function() {
+  var pageLoadId = templateStorage.getItem('pageLoadId');
+  if (!pageLoadId) {
+    pageLoadId = getTimestampMillis() + '-' + generateRandom(0, 2147483647);
+    templateStorage.setItem('pageLoadId', pageLoadId);
+  }
+  return pageLoadId;
+};
+
 
 // =============================================================================
 // MAIN LOGIC
 // =============================================================================
 
 const eventName = copyFromDataLayer('event');
-const timestamp = getTimestampMillis();
+const eventId = copyFromDataLayer('gtm.uniqueEventId');
+const pageLoadId = getPageLoadId();
 const cv = getContainerVersion();
 const pageUrl = getUrl('href');
+
+const sendEvent = function(type, eventDataObj) {
+  var payload = {
+    source: 'gtm',
+    source_id: cv.containerId,
+    events: [{
+      type: type,
+      timestamp: getTimestampMillis(),
+      data: eventDataObj,
+      metadata: {
+        container_id: cv.containerId,
+        container_version: cv.version,
+        environment: cv.environmentName || 'live',
+        page_url: pageUrl,
+        page_load_id: pageLoadId,
+        event_id: eventId
+      }
+    }]
+  };
+
+  debugLog('Sending payload:', payload);
+
+  var jsonStr = JSON.stringify(payload);
+  var url = ENDPOINT + '?k=' + encodeUriComponent(apiKey) + '&d=' + encodeUriComponent(jsonStr);
+
+  if (url.length > MAX_PIXEL_URL_LENGTH) {
+    log('[Adwize] Payload too large for collect pixel (' + url.length +
+        ' chars). Skipping send of ' + type + '. Turn off full dataLayer, reduce ecommerce items, or monitor fewer tags.');
+    return;
+  }
+
+  sendPixel(url, function() {
+    debugLog('Event sent successfully: ' + type);
+  }, function() {
+    log('[Adwize] Failed to send event: ' + type);
+  });
+};
+
+if (monitorTags) {
+  addEventCallback(function(containerId, eventData) {
+    const monitored = getMonitoredTags(eventData && eventData.tags);
+    if (monitored.length === 0) {
+      debugLog('No monitored tags fired for event: ' + eventName);
+      return;
+    }
+    sendEvent(TAG_STATUS_EVENT_TYPE, {event: eventName, tags: monitored});
+  });
+}
 
 if (!shouldCaptureEvent(eventName)) {
   debugLog('Skipping event (not in capture list): ' + eventName);
@@ -225,41 +327,7 @@ if (fullDataLayer) {
   eventDataObj.dataLayer = fullDataLayer;
 }
 
-var payload = {
-  source: 'gtm',
-  source_id: cv.containerId,
-  events: [{
-    type: eventName,
-    timestamp: timestamp,
-    data: eventDataObj,
-    metadata: {
-      container_id: cv.containerId,
-      container_version: cv.version,
-      environment: cv.environmentName || 'live',
-      page_url: pageUrl
-    }
-  }]
-};
-
-debugLog('Sending payload:', payload);
-
-var jsonStr = JSON.stringify(payload);
-var url = ENDPOINT + '?k=' + encodeUriComponent(apiKey) + '&d=' + encodeUriComponent(jsonStr);
-
-// GET collect URLs fail silently past ~2k–8k chars. Skip send and always log.
-var MAX_PIXEL_URL_LENGTH = 1800;
-if (url.length > MAX_PIXEL_URL_LENGTH) {
-  log('[Adwize] Payload too large for collect pixel (' + url.length +
-      ' chars). Skipping send. Turn off full dataLayer or reduce ecommerce items.');
-  data.gtmOnSuccess();
-  return;
-}
-
-sendPixel(url, function() {
-  debugLog('Event sent successfully: ' + eventName);
-}, function() {
-  log('[Adwize] Failed to send event: ' + eventName);
-});
+sendEvent(eventName, eventDataObj);
 
 data.gtmOnSuccess();
 
@@ -289,6 +357,26 @@ ___WEB_PERMISSIONS___
     "instance": {
       "key": {
         "publicId": "read_container_data",
+        "versionId": "1"
+      },
+      "param": []
+    },
+    "isRequired": true
+  },
+  {
+    "instance": {
+      "key": {
+        "publicId": "read_event_metadata",
+        "versionId": "1"
+      },
+      "param": []
+    },
+    "isRequired": true
+  },
+  {
+    "instance": {
+      "key": {
+        "publicId": "access_template_storage",
         "versionId": "1"
       },
       "param": []
@@ -603,6 +691,116 @@ scenarios:
     assertApi('gtmOnSuccess').wasCalled();
     assertApi('sendPixel').wasNotCalled();
     assertApi('logToConsole').wasCalled();
+- name: "Tag monitoring off does not register an event callback"
+  code: |-
+    mock('copyFromDataLayer', function(key) {
+      if (key === 'event') return 'purchase';
+      return undefined;
+    });
+    mock('getContainerVersion', function() {
+      return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
+    });
+    mock('getTimestampMillis', function() { return 1700000000000; });
+    mock('getUrl', function() { return 'https://example.com/checkout'; });
+    mock('sendPixel', function(url, onSuccess, onFailure) {
+      onSuccess();
+    });
+
+    runCode({apiKey: 'ts_live_test123', triggerMode: 'all', debugMode: false, captureDataLayer: false, captureEcommerceItems: true, monitorTags: false});
+
+    assertApi('addEventCallback').wasNotCalled();
+    assertApi('gtmOnSuccess').wasCalled();
+- name: "Tag monitoring reports only tags with monitor metadata"
+  code: |-
+    var callback;
+    var urls = [];
+    mock('copyFromDataLayer', function(key) {
+      if (key === 'event') return 'purchase';
+      if (key === 'gtm.uniqueEventId') return 42;
+      return undefined;
+    });
+    mock('getContainerVersion', function() {
+      return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
+    });
+    mock('getTimestampMillis', function() { return 1700000000000; });
+    mock('getUrl', function() { return 'https://example.com/checkout'; });
+    mock('generateRandom', function() { return 7; });
+    mock('addEventCallback', function(cb) { callback = cb; });
+    // templateStorage cannot be mocked with an object: the sandbox drops
+    // function properties, so getItem is missing. Clear the real store.
+    // It survives across scenarios, and a stored pageLoadId would hide
+    // the generateRandom mock above.
+    require('templateStorage').removeItem('pageLoadId');
+    mock('sendPixel', function(url, onSuccess, onFailure) {
+      urls.push(url);
+      onSuccess();
+    });
+
+    runCode({apiKey: 'ts_live_test123', triggerMode: 'all', debugMode: false, captureDataLayer: false, captureEcommerceItems: true, monitorTags: true});
+    callback('GTM-TEST1', {tags: [
+      {id: '12', name: 'GA4Purchase', status: 'failure', executionTime: 120, monitor: 'true'},
+      {id: '13', name: 'Floodlight', status: 'success', executionTime: 300}
+    ]});
+
+    assertThat(urls.length).isEqualTo(2);
+    assertThat(urls[0]).contains('1700000000000-7');
+    assertThat(urls[1]).contains('1700000000000-7');
+    assertThat(urls[1]).contains('adwize.tag_status');
+    assertThat(urls[1]).contains('GA4Purchase');
+    assertThat(urls[1]).contains('failure');
+    assertThat(urls[1]).doesNotContain('Floodlight');
+- name: "Tag monitoring sends nothing when no monitored tag fired"
+  code: |-
+    var callback;
+    var urls = [];
+    mock('copyFromDataLayer', function(key) {
+      if (key === 'event') return 'purchase';
+      return undefined;
+    });
+    mock('getContainerVersion', function() {
+      return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
+    });
+    mock('getTimestampMillis', function() { return 1700000000000; });
+    mock('getUrl', function() { return 'https://example.com/checkout'; });
+    mock('addEventCallback', function(cb) { callback = cb; });
+    mock('sendPixel', function(url, onSuccess, onFailure) {
+      urls.push(url);
+      onSuccess();
+    });
+
+    runCode({apiKey: 'ts_live_test123', triggerMode: 'all', debugMode: false, captureDataLayer: false, captureEcommerceItems: true, monitorTags: true});
+    callback('GTM-TEST1', {tags: [
+      {id: '13', name: 'Floodlight', status: 'success', executionTime: 300, monitor: 'false'}
+    ]});
+
+    assertThat(urls.length).isEqualTo(1);
+- name: "Tag monitoring runs on events skipped by the capture list"
+  code: |-
+    var callback;
+    var urls = [];
+    mock('copyFromDataLayer', function(key) {
+      if (key === 'event') return 'gtm.js';
+      return undefined;
+    });
+    mock('getContainerVersion', function() {
+      return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
+    });
+    mock('getTimestampMillis', function() { return 1700000000000; });
+    mock('getUrl', function() { return 'https://example.com/thank-you'; });
+    mock('addEventCallback', function(cb) { callback = cb; });
+    mock('sendPixel', function(url, onSuccess, onFailure) {
+      urls.push(url);
+      onSuccess();
+    });
+
+    runCode({apiKey: 'ts_live_test123', triggerMode: 'ecommerce', debugMode: false, captureDataLayer: false, captureEcommerceItems: true, monitorTags: true});
+    callback('GTM-TEST1', {tags: [
+      {id: '20', name: 'AdsConversion', status: 'success', executionTime: 80, monitor: 'true'}
+    ]});
+
+    assertThat(urls.length).isEqualTo(1);
+    assertThat(urls[0]).contains('AdsConversion');
+    assertApi('gtmOnSuccess').wasCalled();
 
 
 ___NOTES___
@@ -615,8 +813,10 @@ e-commerce data, optional full dataLayer snapshot, and
 container metadata) and forwards them to the Adwize API for
 quality monitoring and alerting.
 
-It does not report whether other GTM tags (GA4, Ads, etc.)
-fired successfully — only the dataLayer events this tag observes.
+Optional tag monitoring (Tag Monitoring > Report status of
+monitored tags) also reports the status and execution time of
+the GTM tags you mark with tag metadata monitor = true, for
+each event this tag fires on.
 
 Setup:
 1. Import this template into GTM (Templates > Tag Templates > New > Import)
@@ -627,8 +827,8 @@ Setup:
 6. Publish your container
 
 Tests:
-The template includes 9 unit tests covering all trigger modes,
-edge cases, and URL construction. After importing, go to the
+The template includes 13 unit tests covering all trigger modes,
+tag monitoring, edge cases, and URL construction. After importing, go to the
 template editor > Tests tab and click "Run Tests" to validate.
 
 For support: support@getadwize.com
