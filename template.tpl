@@ -122,7 +122,7 @@ ___TEMPLATE_PARAMETERS___
         "checkboxText": "Report status of monitored tags",
         "simpleValueType": true,
         "defaultValue": false,
-        "help": "After each event this tag fires on, send the status (success, failure, exception, timeout) and execution time of the tags that fired for that event and carry the metadata monitor = true (Advanced Settings > Additional Tag Metadata; check Include Tag Name with key name to report tag names). Runs on every event this tag fires on, regardless of When to Send Data."
+        "help": "After each event this tag fires on, send status totals for every tag that fired, plus the status, execution time and metadata of the tags that carry monitor = true (Advanced Settings > Additional Tag Metadata; check Include Tag Name with key name to report tag names). Unmonitored tags that did not succeed are listed by id. Large reports are split across several requests, failures first. Runs on every event this tag fires on, regardless of When to Send Data."
       }
     ]
   }
@@ -138,7 +138,9 @@ const encodeUriComponent = require('encodeUriComponent');
 const generateRandom = require('generateRandom');
 const getContainerVersion = require('getContainerVersion');
 const getTimestampMillis = require('getTimestampMillis');
+const isConsentGranted = require('isConsentGranted');
 const JSON = require('JSON');
+const Object = require('Object');
 const sendPixel = require('sendPixel');
 const getUrl = require('getUrl');
 const log = require('logToConsole');
@@ -159,6 +161,9 @@ const monitorTags = data.monitorTags || false;
 
 const MONITOR_METADATA_KEY = 'monitor';
 const TAG_STATUS_EVENT_TYPE = 'adwize.tag_status';
+const TAG_STATUSES = ['success', 'failure', 'exception', 'timeout'];
+const BASE_TAG_KEYS = ['id', 'name', 'status', 'execution_time'];
+const CONSENT_TYPES = ['ad_storage', 'analytics_storage', 'ad_user_data', 'ad_personalization'];
 
 // GET collect URLs fail silently past ~2k–8k chars. Skip send and always log.
 const MAX_PIXEL_URL_LENGTH = 1800;
@@ -212,20 +217,63 @@ const getEcommerceData = function() {
   return null;
 };
 
-const getMonitoredTags = function(tags) {
-  const monitored = [];
-  if (!tags) return monitored;
+// isConsentGranted also returns true for a consent type that was never set.
+const getConsentState = function() {
+  const consent = {};
+  for (var i = 0; i < CONSENT_TYPES.length; i++) {
+    consent[CONSENT_TYPES[i]] = isConsentGranted(CONSENT_TYPES[i]);
+  }
+  return consent;
+};
+
+// A monitored tag with every metadata key it carries, except the monitor flag.
+const toMonitoredTag = function(tag) {
+  const entry = {
+    id: tag.id,
+    name: tag.name,
+    status: tag.status,
+    execution_time: tag.executionTime
+  };
+  const keys = Object.keys(tag);
+  for (var i = 0; i < keys.length; i++) {
+    const key = keys[i];
+    if (key === MONITOR_METADATA_KEY || key === 'executionTime' || BASE_TAG_KEYS.indexOf(key) !== -1) continue;
+    entry[key] = tag[key];
+  }
+  return entry;
+};
+
+// Totals for every tag that fired, full detail for monitored tags, and the
+// id/status of unmonitored tags that did not succeed.
+const summarizeTags = function(tags) {
+  const summary = {total: 0, success: 0, failure: 0, exception: 0, timeout: 0};
+  const failedMonitored = [];
+  const succeededMonitored = [];
+  const unmonitoredIssues = [];
+  if (!tags) tags = [];
   for (var i = 0; i < tags.length; i++) {
-    if (tags[i][MONITOR_METADATA_KEY] === 'true') {
-      monitored.push({
-        id: tags[i].id,
-        name: tags[i].name,
-        status: tags[i].status,
-        execution_time: tags[i].executionTime
-      });
+    const tag = tags[i];
+    summary.total++;
+    if (TAG_STATUSES.indexOf(tag.status) !== -1) summary[tag.status]++;
+
+    if (tag[MONITOR_METADATA_KEY] === 'true') {
+      if (tag.status === 'success') {
+        succeededMonitored.push(toMonitoredTag(tag));
+      } else {
+        failedMonitored.push(toMonitoredTag(tag));
+      }
+    } else if (tag.status !== 'success') {
+      const issue = {id: tag.id, status: tag.status};
+      if (tag.name) issue.name = tag.name;
+      unmonitoredIssues.push(issue);
     }
   }
-  return monitored;
+  return {
+    summary: summary,
+    failedMonitored: failedMonitored,
+    succeededMonitored: succeededMonitored,
+    unmonitoredIssues: unmonitoredIssues
+  };
 };
 
 // gtm.uniqueEventId restarts on every page load: pair it with an id shared by
@@ -250,36 +298,30 @@ const pageLoadId = getPageLoadId();
 const cv = getContainerVersion();
 const pageUrl = getUrl('href');
 
-const sendEvent = function(type, eventDataObj) {
-  var payload = {
+const buildUrl = function(type, eventDataObj, containerId) {
+  const payload = {
     source: 'gtm',
-    source_id: cv.containerId,
+    source_id: containerId,
     events: [{
       type: type,
       timestamp: getTimestampMillis(),
       data: eventDataObj,
       metadata: {
-        container_id: cv.containerId,
+        container_id: containerId,
         container_version: cv.version,
         environment: cv.environmentName || 'live',
         page_url: pageUrl,
         page_load_id: pageLoadId,
-        event_id: eventId
+        event_id: eventId,
+        consent: getConsentState()
       }
     }]
   };
+  debugLog('Payload for ' + type + ':', payload);
+  return ENDPOINT + '?k=' + encodeUriComponent(apiKey) + '&d=' + encodeUriComponent(JSON.stringify(payload));
+};
 
-  debugLog('Sending payload:', payload);
-
-  var jsonStr = JSON.stringify(payload);
-  var url = ENDPOINT + '?k=' + encodeUriComponent(apiKey) + '&d=' + encodeUriComponent(jsonStr);
-
-  if (url.length > MAX_PIXEL_URL_LENGTH) {
-    log('[Adwize] Payload too large for collect pixel (' + url.length +
-        ' chars). Skipping send of ' + type + '. Turn off full dataLayer, reduce ecommerce items, or monitor fewer tags.');
-    return;
-  }
-
+const sendUrl = function(url, type) {
   sendPixel(url, function() {
     debugLog('Event sent successfully: ' + type);
   }, function() {
@@ -287,14 +329,84 @@ const sendEvent = function(type, eventDataObj) {
   });
 };
 
+const sendEvent = function(type, eventDataObj, containerId) {
+  const url = buildUrl(type, eventDataObj, containerId);
+  if (url.length > MAX_PIXEL_URL_LENGTH) {
+    log('[Adwize] Payload too large for collect pixel (' + url.length +
+        ' chars). Skipping send of ' + type + '. Turn off full dataLayer or reduce ecommerce items.');
+    return;
+  }
+  sendUrl(url, type);
+};
+
+// Tag status for one event, split across as many pixels as needed. Failed
+// monitored tags go first, then unmonitored issues, then successful monitored
+// tags, so a failure is never the part that gets cut. Part 1 carries the totals.
+const sendTagStatus = function(containerId, tags) {
+  const result = summarizeTags(tags);
+  const items = [];
+  var i;
+  for (i = 0; i < result.failedMonitored.length; i++) items.push({kind: 'tag', value: result.failedMonitored[i]});
+  for (i = 0; i < result.unmonitoredIssues.length; i++) items.push({kind: 'issue', value: result.unmonitoredIssues[i]});
+  for (i = 0; i < result.succeededMonitored.length; i++) items.push({kind: 'tag', value: result.succeededMonitored[i]});
+
+  // Placeholder part numbers reserve room for the real ones.
+  const buildPart = function(withSummary, partItems, index, count) {
+    const part = {event: eventName, part: {index: index, count: count}, tags: [], unmonitored_issues: []};
+    if (withSummary) part.summary = result.summary;
+    for (var j = 0; j < partItems.length; j++) {
+      if (partItems[j].kind === 'tag') {
+        part.tags.push(partItems[j].value);
+      } else {
+        part.unmonitored_issues.push(partItems[j].value);
+      }
+    }
+    return part;
+  };
+  const fits = function(withSummary, partItems) {
+    return buildUrl(TAG_STATUS_EVENT_TYPE, buildPart(withSummary, partItems, 99, 99), containerId).length <= MAX_PIXEL_URL_LENGTH;
+  };
+  const shrink = function(item) {
+    if (item.kind !== 'tag') return item;
+    return {kind: 'tag', value: {id: item.value.id, status: item.value.status, execution_time: item.value.execution_time}};
+  };
+
+  const parts = [];
+  var current = [];
+  for (i = 0; i < items.length; i++) {
+    var item = items[i];
+    var candidate = current.slice();
+    candidate.push(item);
+    if (fits(parts.length === 0, candidate)) {
+      current = candidate;
+      continue;
+    }
+    if (current.length > 0) {
+      parts.push(current);
+      current = [];
+    }
+    // A single item too large for an empty part keeps only id, status and time.
+    if (!fits(parts.length === 0, [item])) {
+      item = shrink(item);
+      if (!fits(parts.length === 0, [item])) {
+        log('[Adwize] Tag status for tag ' + item.value.id + ' too large for collect pixel. Skipping it.');
+        continue;
+      }
+    }
+    current.push(item);
+  }
+  if (current.length > 0 || parts.length === 0) parts.push(current);
+
+  for (i = 0; i < parts.length; i++) {
+    const part = buildPart(i === 0, parts[i], i + 1, parts.length);
+    sendUrl(buildUrl(TAG_STATUS_EVENT_TYPE, part, containerId), TAG_STATUS_EVENT_TYPE);
+  }
+};
+
 if (monitorTags) {
   addEventCallback(function(containerId, eventData) {
-    const monitored = getMonitoredTags(eventData && eventData.tags);
-    if (monitored.length === 0) {
-      debugLog('No monitored tags fired for event: ' + eventName);
-      return;
-    }
-    sendEvent(TAG_STATUS_EVENT_TYPE, {event: eventName, tags: monitored});
+    debugLog('Tags that fired for ' + eventName + ':', eventData && eventData.tags);
+    sendTagStatus(containerId || cv.containerId, eventData && eventData.tags);
   });
 }
 
@@ -327,7 +439,7 @@ if (fullDataLayer) {
   eventDataObj.dataLayer = fullDataLayer;
 }
 
-sendEvent(eventName, eventDataObj);
+sendEvent(eventName, eventDataObj, cv.containerId);
 
 data.gtmOnSuccess();
 
@@ -370,6 +482,149 @@ ___WEB_PERMISSIONS___
         "versionId": "1"
       },
       "param": []
+    },
+    "isRequired": true
+  },
+  {
+    "instance": {
+      "key": {
+        "publicId": "access_consent",
+        "versionId": "1"
+      },
+      "param": [
+        {
+          "key": "consentTypes",
+          "value": {
+            "type": 2,
+            "listItem": [
+              {
+                "type": 3,
+                "mapKey": [
+                  {
+                    "type": 1,
+                    "string": "consentType"
+                  },
+                  {
+                    "type": 1,
+                    "string": "read"
+                  },
+                  {
+                    "type": 1,
+                    "string": "write"
+                  }
+                ],
+                "mapValue": [
+                  {
+                    "type": 1,
+                    "string": "ad_storage"
+                  },
+                  {
+                    "type": 8,
+                    "boolean": true
+                  },
+                  {
+                    "type": 8,
+                    "boolean": false
+                  }
+                ]
+              },
+              {
+                "type": 3,
+                "mapKey": [
+                  {
+                    "type": 1,
+                    "string": "consentType"
+                  },
+                  {
+                    "type": 1,
+                    "string": "read"
+                  },
+                  {
+                    "type": 1,
+                    "string": "write"
+                  }
+                ],
+                "mapValue": [
+                  {
+                    "type": 1,
+                    "string": "analytics_storage"
+                  },
+                  {
+                    "type": 8,
+                    "boolean": true
+                  },
+                  {
+                    "type": 8,
+                    "boolean": false
+                  }
+                ]
+              },
+              {
+                "type": 3,
+                "mapKey": [
+                  {
+                    "type": 1,
+                    "string": "consentType"
+                  },
+                  {
+                    "type": 1,
+                    "string": "read"
+                  },
+                  {
+                    "type": 1,
+                    "string": "write"
+                  }
+                ],
+                "mapValue": [
+                  {
+                    "type": 1,
+                    "string": "ad_user_data"
+                  },
+                  {
+                    "type": 8,
+                    "boolean": true
+                  },
+                  {
+                    "type": 8,
+                    "boolean": false
+                  }
+                ]
+              },
+              {
+                "type": 3,
+                "mapKey": [
+                  {
+                    "type": 1,
+                    "string": "consentType"
+                  },
+                  {
+                    "type": 1,
+                    "string": "read"
+                  },
+                  {
+                    "type": 1,
+                    "string": "write"
+                  }
+                ],
+                "mapValue": [
+                  {
+                    "type": 1,
+                    "string": "ad_personalization"
+                  },
+                  {
+                    "type": 8,
+                    "boolean": true
+                  },
+                  {
+                    "type": 8,
+                    "boolean": false
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
     },
     "isRequired": true
   },
@@ -749,10 +1004,12 @@ scenarios:
     assertThat(urls[1]).contains('GA4Purchase');
     assertThat(urls[1]).contains('failure');
     assertThat(urls[1]).doesNotContain('Floodlight');
-- name: "Tag monitoring sends nothing when no monitored tag fired"
+- name: "Tag monitoring sends totals when no monitored tag fired"
   code: |-
     var callback;
     var urls = [];
+    var decode = require('decodeUriComponent');
+    var JSON = require('JSON');
     mock('copyFromDataLayer', function(key) {
       if (key === 'event') return 'purchase';
       return undefined;
@@ -773,7 +1030,12 @@ scenarios:
       {id: '13', name: 'Floodlight', status: 'success', executionTime: 300, monitor: 'false'}
     ]});
 
-    assertThat(urls.length).isEqualTo(1);
+    assertThat(urls.length).isEqualTo(2);
+    var payload = JSON.parse(decode(urls[1].split('&d=')[1])).events[0].data;
+    assertThat(payload.summary.total).isEqualTo(1);
+    assertThat(payload.summary.success).isEqualTo(1);
+    assertThat(payload.tags.length).isEqualTo(0);
+    assertThat(payload.unmonitored_issues.length).isEqualTo(0);
 - name: "Tag monitoring runs on events skipped by the capture list"
   code: |-
     var callback;
@@ -801,7 +1063,206 @@ scenarios:
     assertThat(urls.length).isEqualTo(1);
     assertThat(urls[0]).contains('AdsConversion');
     assertApi('gtmOnSuccess').wasCalled();
+- name: "Tag status forwards extra metadata and drops the monitor flag"
+  code: |-
+    var callback;
+    var urls = [];
+    var decode = require('decodeUriComponent');
+    var JSON = require('JSON');
+    mock('copyFromDataLayer', function(key) {
+      if (key === 'event') return 'purchase';
+      return undefined;
+    });
+    mock('getContainerVersion', function() {
+      return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
+    });
+    mock('getTimestampMillis', function() { return 1700000000000; });
+    mock('getUrl', function() { return 'https://example.com/checkout'; });
+    mock('addEventCallback', function(cb) { callback = cb; });
+    mock('sendPixel', function(url, onSuccess, onFailure) {
+      urls.push(url);
+      onSuccess();
+    });
 
+    runCode({apiKey: 'ts_live_test123', triggerMode: 'custom', customEvents: 'add_to_cart', debugMode: false, captureDataLayer: false, captureEcommerceItems: true, monitorTags: true});
+    callback('GTM-TEST1', {tags: [
+      {id: '12', name: 'GA4 - Purchase', status: 'success', executionTime: 85, monitor: 'true', platform: 'ga4', priority: 'critical'}
+    ]});
+
+    assertThat(urls.length).isEqualTo(1);
+    var tag = JSON.parse(decode(urls[0].split('&d=')[1])).events[0].data.tags[0];
+    assertThat(tag.id).isEqualTo('12');
+    assertThat(tag.name).isEqualTo('GA4 - Purchase');
+    assertThat(tag.execution_time).isEqualTo(85);
+    assertThat(tag.platform).isEqualTo('ga4');
+    assertThat(tag.priority).isEqualTo('critical');
+    assertThat(tag.monitor).isUndefined();
+    assertThat(tag.executionTime).isUndefined();
+- name: "Tag status counts every tag and lists unmonitored issues"
+  code: |-
+    var callback;
+    var urls = [];
+    var decode = require('decodeUriComponent');
+    var JSON = require('JSON');
+    mock('copyFromDataLayer', function(key) {
+      if (key === 'event') return 'purchase';
+      return undefined;
+    });
+    mock('getContainerVersion', function() {
+      return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
+    });
+    mock('getTimestampMillis', function() { return 1700000000000; });
+    mock('getUrl', function() { return 'https://example.com/checkout'; });
+    mock('addEventCallback', function(cb) { callback = cb; });
+    mock('sendPixel', function(url, onSuccess, onFailure) {
+      urls.push(url);
+      onSuccess();
+    });
+
+    runCode({apiKey: 'ts_live_test123', triggerMode: 'custom', customEvents: 'add_to_cart', debugMode: false, captureDataLayer: false, captureEcommerceItems: true, monitorTags: true});
+    callback('GTM-TEST1', {tags: [
+      {id: '1', name: 'GA4 - Purchase', status: 'success', executionTime: 85, monitor: 'true'},
+      {id: '2', name: 'Ads - Conversion', status: 'failure', executionTime: 40, monitor: 'true'},
+      {id: '3', name: 'Meta - Purchase', status: 'exception', executionTime: 5},
+      {id: '4', status: 'timeout', executionTime: 2000},
+      {id: '5', name: 'TikTok', status: 'success', executionTime: 30}
+    ]});
+
+    var data = JSON.parse(decode(urls[0].split('&d=')[1])).events[0].data;
+    assertThat(data.summary).isEqualTo({total: 5, success: 2, failure: 1, exception: 1, timeout: 1});
+    assertThat(data.tags.length).isEqualTo(2);
+    assertThat(data.tags[0].id).isEqualTo('2');
+    assertThat(data.unmonitored_issues).isEqualTo([
+      {id: '3', status: 'exception', name: 'Meta - Purchase'},
+      {id: '4', status: 'timeout'}
+    ]);
+    assertThat(data.part).isEqualTo({index: 1, count: 1});
+- name: "Tag status uses the container id passed to the callback"
+  code: |-
+    var callback;
+    var urls = [];
+    var decode = require('decodeUriComponent');
+    var JSON = require('JSON');
+    mock('copyFromDataLayer', function(key) {
+      if (key === 'event') return 'purchase';
+      return undefined;
+    });
+    mock('getContainerVersion', function() {
+      return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
+    });
+    mock('getTimestampMillis', function() { return 1700000000000; });
+    mock('getUrl', function() { return 'https://example.com/checkout'; });
+    mock('addEventCallback', function(cb) { callback = cb; });
+    mock('sendPixel', function(url, onSuccess, onFailure) {
+      urls.push(url);
+      onSuccess();
+    });
+
+    runCode({apiKey: 'ts_live_test123', triggerMode: 'custom', customEvents: 'add_to_cart', debugMode: false, captureDataLayer: false, captureEcommerceItems: true, monitorTags: true});
+    callback('GTM-OTHER', {tags: [{id: '1', status: 'success', executionTime: 10, monitor: 'true'}]});
+
+    var payload = JSON.parse(decode(urls[0].split('&d=')[1]));
+    assertThat(payload.source_id).isEqualTo('GTM-OTHER');
+    assertThat(payload.events[0].metadata.container_id).isEqualTo('GTM-OTHER');
+- name: "Payloads carry consent state"
+  code: |-
+    var urls = [];
+    var decode = require('decodeUriComponent');
+    var JSON = require('JSON');
+    mock('copyFromDataLayer', function(key) {
+      if (key === 'event') return 'purchase';
+      return undefined;
+    });
+    mock('getContainerVersion', function() {
+      return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
+    });
+    mock('getTimestampMillis', function() { return 1700000000000; });
+    mock('getUrl', function() { return 'https://example.com/checkout'; });
+    mock('isConsentGranted', function(type) { return type === 'analytics_storage'; });
+    mock('sendPixel', function(url, onSuccess, onFailure) {
+      urls.push(url);
+      onSuccess();
+    });
+
+    runCode({apiKey: 'ts_live_test123', triggerMode: 'all', debugMode: false, captureDataLayer: false, captureEcommerceItems: true});
+
+    var consent = JSON.parse(decode(urls[0].split('&d=')[1])).events[0].metadata.consent;
+    assertThat(consent).isEqualTo({ad_storage: false, analytics_storage: true, ad_user_data: false, ad_personalization: false});
+- name: "Large tag status is split with failures first"
+  code: |-
+    var callback;
+    var urls = [];
+    var decode = require('decodeUriComponent');
+    var JSON = require('JSON');
+    mock('copyFromDataLayer', function(key) {
+      if (key === 'event') return 'purchase';
+      return undefined;
+    });
+    mock('getContainerVersion', function() {
+      return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
+    });
+    mock('getTimestampMillis', function() { return 1700000000000; });
+    mock('getUrl', function() { return 'https://example.com/checkout'; });
+    mock('addEventCallback', function(cb) { callback = cb; });
+    mock('sendPixel', function(url, onSuccess, onFailure) {
+      urls.push(url);
+      onSuccess();
+    });
+
+    runCode({apiKey: 'ts_live_test123', triggerMode: 'custom', customEvents: 'add_to_cart', debugMode: false, captureDataLayer: false, captureEcommerceItems: true, monitorTags: true});
+    var tags = [];
+    for (var i = 0; i < 40; i++) {
+      tags.push({id: 'T' + i, name: 'Tag number ' + i + ' with a long name', status: 'success', executionTime: 10, monitor: 'true', platform: 'ga4'});
+    }
+    tags.push({id: 'FAIL', name: 'Broken tag', status: 'failure', executionTime: 10, monitor: 'true'});
+    callback('GTM-TEST1', {tags: tags});
+
+    assertThat(urls.length > 1).isTrue();
+    var reported = 0;
+    for (var j = 0; j < urls.length; j++) {
+      assertThat(urls[j].length <= 1800).isTrue();
+      var data = JSON.parse(decode(urls[j].split('&d=')[1])).events[0].data;
+      assertThat(data.part).isEqualTo({index: j + 1, count: urls.length});
+      if (j === 0) {
+        assertThat(data.summary.total).isEqualTo(41);
+        assertThat(data.tags[0].id).isEqualTo('FAIL');
+      } else {
+        assertThat(data.summary).isUndefined();
+      }
+      reported += data.tags.length;
+    }
+    assertThat(reported).isEqualTo(41);
+- name: "Oversized single tag is sent with id, status and time only"
+  code: |-
+    var callback;
+    var urls = [];
+    var decode = require('decodeUriComponent');
+    var JSON = require('JSON');
+    mock('copyFromDataLayer', function(key) {
+      if (key === 'event') return 'purchase';
+      return undefined;
+    });
+    mock('getContainerVersion', function() {
+      return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
+    });
+    mock('getTimestampMillis', function() { return 1700000000000; });
+    mock('getUrl', function() { return 'https://example.com/checkout'; });
+    mock('addEventCallback', function(cb) { callback = cb; });
+    mock('sendPixel', function(url, onSuccess, onFailure) {
+      urls.push(url);
+      onSuccess();
+    });
+
+    runCode({apiKey: 'ts_live_test123', triggerMode: 'custom', customEvents: 'add_to_cart', debugMode: false, captureDataLayer: false, captureEcommerceItems: true, monitorTags: true});
+    var longValue = '';
+    for (var i = 0; i < 200; i++) longValue += 'xxxxxxxxxx';
+    callback('GTM-TEST1', {tags: [
+      {id: '7', name: 'Big', status: 'failure', executionTime: 10, monitor: 'true', notes: longValue}
+    ]});
+
+    assertThat(urls.length).isEqualTo(1);
+    var tag = JSON.parse(decode(urls[0].split('&d=')[1])).events[0].data.tags[0];
+    assertThat(tag).isEqualTo({id: '7', status: 'failure', execution_time: 10});
 
 ___NOTES___
 
@@ -809,27 +1270,29 @@ Adwize Data Quality Monitor GTM Tag Template
 =============================================
 
 This tag captures dataLayer events (event name, optional
-e-commerce data, optional full dataLayer snapshot, and
-container metadata) and forwards them to the Adwize API for
-quality monitoring and alerting.
+e-commerce data, optional full dataLayer snapshot, container
+metadata and consent state) and forwards them to the Adwize API
+for quality monitoring and alerting.
 
 Optional tag monitoring (Tag Monitoring > Report status of
-monitored tags) also reports the status and execution time of
-the GTM tags you mark with tag metadata monitor = true, for
-each event this tag fires on.
+monitored tags) reports, for each event this tag fires on:
+status totals for every tag that fired; status, execution time
+and metadata of the tags marked with metadata monitor = true;
+and the id of unmonitored tags that did not succeed.
 
 Setup:
 1. Import this template into GTM (Templates > Tag Templates > New > Import)
 2. Create a new tag using this template (Tags > New > select "Adwize")
 3. Enter your API key from the Adwize dashboard (Settings > API Keys)
-4. Set trigger to "All Pages"
+4. Add the triggers for the events you want to monitor
 5. Preview to verify events are sent
 6. Publish your container
 
 Tests:
-The template includes 13 unit tests covering all trigger modes,
-tag monitoring, edge cases, and URL construction. After importing, go to the
-template editor > Tests tab and click "Run Tests" to validate.
+The template includes 19 unit tests covering all trigger modes,
+tag monitoring, payload splitting, consent, edge cases, and URL
+construction. After importing, go to the template editor > Tests
+tab and click "Run Tests" to validate.
 
 For support: support@getadwize.com
 
