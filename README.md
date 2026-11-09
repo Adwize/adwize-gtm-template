@@ -92,6 +92,8 @@ What differs, because a server container is not a page:
 - The data-event request settles the tag (`gtmOnSuccess` / `gtmOnFailure`). The tag-status request only logs a failure.
 - The page URL comes from the event's `page_location`. The full snapshot is the parsed event, not the browser dataLayer.
 
+**Capture full event data snapshot** sends that parsed event to Adwize with nothing removed. It can include personal data from the hit, such as the visitor IP (`ip_override`), user agent, `user_data`, and the full page URL (`page_location`, including the query string). **Enable debug logging** writes each outgoing payload to the server container logs, including the production logs of a published container, so the same data can be written there when the snapshot is on. The logged payload also includes the page URL with its query string. Keep both off in production unless you have a reason and a legal basis.
+
 Set this tag to fire **once per event**, and make its trigger cover every event a monitored server tag fires on. A monitored tag that fires on an event this tag does not fire on is missing, not failed.
 
 ## Tests

@@ -90,7 +90,7 @@ ___TEMPLATE_PARAMETERS___
         "checkboxText": "Capture full event data snapshot",
         "simpleValueType": true,
         "defaultValue": false,
-        "help": "Include the complete parsed event object in each payload. Useful for debugging but increases the POST body size. The event is still sent — this template posts JSON, so there is no URL length limit."
+        "help": "Include the complete event object in each payload, with nothing removed. That object can include personal data from the hit, such as the visitor IP (ip_override), user agent, user_data, and the full page URL (page_location, including the query string). Keep this off in production unless you have a reason and a legal basis to send that data. Increases the POST body size. The event is still sent — this template posts JSON, so there is no URL length limit."
       },
       {
         "type": "CHECKBOX",
@@ -106,7 +106,7 @@ ___TEMPLATE_PARAMETERS___
         "checkboxText": "Enable debug logging",
         "simpleValueType": true,
         "defaultValue": false,
-        "help": "Log events to the server container console. Disable in production."
+        "help": "Write each outgoing payload to the server container logs, including the production logs of a published container. When the full event snapshot is on, the log can include the visitor IP, user agent, user_data, and full URLs. The page URL (page_location, including any query string) is logged either way. Keep this off in production unless you have a reason and a legal basis."
       }
     ]
   },
