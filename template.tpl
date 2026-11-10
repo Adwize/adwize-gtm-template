@@ -321,7 +321,13 @@ const buildUrl = function(type, eventDataObj, containerId) {
   return ENDPOINT + '?k=' + encodeUriComponent(apiKey) + '&d=' + encodeUriComponent(JSON.stringify(payload));
 };
 
-const sendUrl = function(url, type) {
+// Every pixel goes through here, so none leaves above the URL cap.
+const sendUrl = function(url, type, tooLargeHint) {
+  if (url.length > MAX_PIXEL_URL_LENGTH) {
+    log('[Adwize] Payload too large for collect pixel (' + url.length +
+        ' chars). Skipping send of ' + type + '. ' + tooLargeHint);
+    return;
+  }
   sendPixel(url, function() {
     debugLog('Event sent successfully: ' + type);
   }, function() {
@@ -330,13 +336,7 @@ const sendUrl = function(url, type) {
 };
 
 const sendEvent = function(type, eventDataObj, containerId) {
-  const url = buildUrl(type, eventDataObj, containerId);
-  if (url.length > MAX_PIXEL_URL_LENGTH) {
-    log('[Adwize] Payload too large for collect pixel (' + url.length +
-        ' chars). Skipping send of ' + type + '. Turn off full dataLayer or reduce ecommerce items.');
-    return;
-  }
-  sendUrl(url, type);
+  sendUrl(buildUrl(type, eventDataObj, containerId), type, 'Turn off full dataLayer or reduce ecommerce items.');
 };
 
 // Tag status for one event, split across as many pixels as needed. Failed
@@ -350,7 +350,6 @@ const sendTagStatus = function(containerId, tags) {
   for (i = 0; i < result.unmonitoredIssues.length; i++) items.push({kind: 'issue', value: result.unmonitoredIssues[i]});
   for (i = 0; i < result.succeededMonitored.length; i++) items.push({kind: 'tag', value: result.succeededMonitored[i]});
 
-  // Placeholder part numbers reserve room for the real ones.
   const buildPart = function(withSummary, partItems, index, count) {
     const part = {event: eventName, part: {index: index, count: count}, tags: [], unmonitored_issues: []};
     if (withSummary) part.summary = result.summary;
@@ -363,12 +362,15 @@ const sendTagStatus = function(containerId, tags) {
     }
     return part;
   };
+  // Placeholder part numbers reserve room for the real ones (up to 9999 parts).
   const fits = function(withSummary, partItems) {
-    return buildUrl(TAG_STATUS_EVENT_TYPE, buildPart(withSummary, partItems, 99, 99), containerId).length <= MAX_PIXEL_URL_LENGTH;
+    return buildUrl(TAG_STATUS_EVENT_TYPE, buildPart(withSummary, partItems, 9999, 9999), containerId).length <= MAX_PIXEL_URL_LENGTH;
   };
   const shrink = function(item) {
-    if (item.kind !== 'tag') return item;
-    return {kind: 'tag', value: {id: item.value.id, status: item.value.status, execution_time: item.value.execution_time}};
+    if (item.kind === 'tag') {
+      return {kind: 'tag', value: {id: item.value.id, status: item.value.status, execution_time: item.value.execution_time}};
+    }
+    return {kind: 'issue', value: {id: item.value.id, status: item.value.status}};
   };
 
   const parts = [];
@@ -385,7 +387,8 @@ const sendTagStatus = function(containerId, tags) {
       parts.push(current);
       current = [];
     }
-    // A single item too large for an empty part keeps only id, status and time.
+    // A single item too large for an empty part keeps only id and status
+    // (plus execution time for a monitored tag).
     if (!fits(parts.length === 0, [item])) {
       item = shrink(item);
       if (!fits(parts.length === 0, [item])) {
@@ -399,7 +402,8 @@ const sendTagStatus = function(containerId, tags) {
 
   for (i = 0; i < parts.length; i++) {
     const part = buildPart(i === 0, parts[i], i + 1, parts.length);
-    sendUrl(buildUrl(TAG_STATUS_EVENT_TYPE, part, containerId), TAG_STATUS_EVENT_TYPE);
+    sendUrl(buildUrl(TAG_STATUS_EVENT_TYPE, part, containerId), TAG_STATUS_EVENT_TYPE + ' part ' + (i + 1),
+        'Shorten the page URL or tag metadata.');
   }
 };
 
@@ -1263,6 +1267,65 @@ scenarios:
     assertThat(urls.length).isEqualTo(1);
     var tag = JSON.parse(decode(urls[0].split('&d=')[1])).events[0].data.tags[0];
     assertThat(tag).isEqualTo({id: '7', status: 'failure', execution_time: 10});
+- name: "No tag status pixel leaves above the URL cap"
+  code: |-
+    var callback;
+    var urls = [];
+    mock('copyFromDataLayer', function(key) {
+      if (key === 'event') return 'purchase';
+      return undefined;
+    });
+    mock('getContainerVersion', function() {
+      return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
+    });
+    mock('getTimestampMillis', function() { return 1700000000000; });
+    var longUrl = 'https://example.com/checkout?q=';
+    for (var i = 0; i < 160; i++) longUrl += 'xxxxxxxxxx';
+    mock('getUrl', function() { return longUrl; });
+    mock('addEventCallback', function(cb) { callback = cb; });
+    mock('sendPixel', function(url, onSuccess, onFailure) {
+      urls.push(url);
+      onSuccess();
+    });
+
+    runCode({apiKey: 'ts_live_test123', triggerMode: 'custom', customEvents: 'add_to_cart', debugMode: false, captureDataLayer: false, captureEcommerceItems: true, monitorTags: true});
+    callback('GTM-TEST1', {tags: [{id: '1', status: 'success', executionTime: 10}]});
+
+    assertThat(urls.length).isEqualTo(0);
+    assertApi('logToConsole').wasCalled();
+- name: "Oversized unmonitored issue is sent with id and status only"
+  code: |-
+    var callback;
+    var urls = [];
+    var decode = require('decodeUriComponent');
+    var JSON = require('JSON');
+    mock('copyFromDataLayer', function(key) {
+      if (key === 'event') return 'purchase';
+      return undefined;
+    });
+    mock('getContainerVersion', function() {
+      return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
+    });
+    mock('getTimestampMillis', function() { return 1700000000000; });
+    mock('getUrl', function() { return 'https://example.com/checkout'; });
+    mock('addEventCallback', function(cb) { callback = cb; });
+    mock('sendPixel', function(url, onSuccess, onFailure) {
+      urls.push(url);
+      onSuccess();
+    });
+
+    runCode({apiKey: 'ts_live_test123', triggerMode: 'custom', customEvents: 'add_to_cart', debugMode: false, captureDataLayer: false, captureEcommerceItems: true, monitorTags: true});
+    var longName = '';
+    for (var i = 0; i < 200; i++) longName += 'xxxxxxxxxx';
+    callback('GTM-TEST1', {tags: [{id: '9', name: longName, status: 'exception', executionTime: 10}]});
+
+    var reported = [];
+    for (var j = 0; j < urls.length; j++) {
+      assertThat(urls[j].length <= 1800).isTrue();
+      var data = JSON.parse(decode(urls[j].split('&d=')[1])).events[0].data;
+      for (var k = 0; k < data.unmonitored_issues.length; k++) reported.push(data.unmonitored_issues[k]);
+    }
+    assertThat(reported).isEqualTo([{id: '9', status: 'exception'}]);
 
 ___NOTES___
 
@@ -1289,7 +1352,7 @@ Setup:
 6. Publish your container
 
 Tests:
-The template includes 19 unit tests covering all trigger modes,
+The template includes 21 unit tests covering all trigger modes,
 tag monitoring, payload splitting, consent, edge cases, and URL
 construction. After importing, go to the template editor > Tests
 tab and click "Run Tests" to validate.

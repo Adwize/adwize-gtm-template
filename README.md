@@ -66,7 +66,7 @@ Each `adwize.tag_status` event carries:
 - `summary` counts every tag that fired for the event, monitored or not.
 - `tags` lists the monitored tags, with every metadata key except `monitor` (for example `platform`, `priority`).
 - `unmonitored_issues` lists tags without `monitor = true` whose status is not `success` (id, status, and name when Include Tag Name is on).
-- A large report is split across several requests that share `page_load_id` and `event_id`. `part` numbers them, and only part 1 carries `summary`. Failed monitored tags are sent first, then unmonitored issues, then successful monitored tags. A single tag too large for one request is sent with `id`, `status` and `execution_time` only.
+- A large report is split across several requests that share `page_load_id` and `event_id`. `part` numbers them, and only part 1 carries `summary`. Failed monitored tags are sent first, then unmonitored issues, then successful monitored tags. A single tag too large for one request is sent with `id`, `status` and `execution_time` only (an unmonitored issue with `id` and `status`). No request is ever sent above the cap; anything that still does not fit is skipped and logged to the console.
 
 ### What a status means
 
@@ -135,7 +135,7 @@ Set this tag to fire **once per event**, and make its trigger cover every event 
 
 ## Tests
 
-The web template has 19 unit tests. The server template has 14. After importing, open the template editor > **Tests** tab > click **Run Tests**.
+The web template has 21 unit tests. The server template has 14. After importing, open the template editor > **Tests** tab > click **Run Tests**.
 
 ## Support
 
