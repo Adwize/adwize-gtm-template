@@ -122,20 +122,26 @@ What matches the web template:
 
 - The same trigger modes (all events, e-commerce only, custom list)
 - Optional tag monitoring: metadata `monitor` = `true`, one `adwize.tag_status` event per event, including events **When to Send Data** skips
+- Tag status carries `summary` (every tag that fired), `tags` (monitored tags with all their metadata, failures first) and `unmonitored_issues` (unmarked tags that did not succeed)
 - `metadata.page_load_id` and `metadata.event_id` on both payloads, so a captured event joins its tag statuses
 
 What differs, because a server container is not a page:
 
-- The collect call is a `POST` with a JSON body. The API key is the `X-Adwize-Api-Key` header, not a query parameter, so there is no URL-length skip.
-- `page_load_id` and `event_id` are taken from the incoming event when the web container forwarded them. Otherwise the tag mints one id for that request. It does not keep the id in server template storage — that storage is shared by every visitor on the process, so one stored id would join unrelated requests.
+- The collect call is a `POST` with a JSON body. The API key is the `X-Adwize-Api-Key` header, not a query parameter, so there is no URL-length limit and tag status is never split.
+- `page_load_id` and `event_id` are read from the incoming event, under the keys set in **Join IDs** (default `page_load_id` and `event_id`). Otherwise the tag mints one id for that request. It does not keep the id in server template storage — that storage is shared by every visitor on the process, so one stored id would join unrelated requests.
+- **Check `event_id` in your setup.** Many server setups (Stape Data Tag, Meta CAPI deduplication) use `event_id` for the Meta deduplication id, which is not GTM's `gtm.uniqueEventId` and will not join with web payloads. Forward `gtm.uniqueEventId` as an event parameter under another key (for example `adwize_event_id`) and enter that key in **Join IDs**.
+- `metadata.consent` comes from the GA4 hit: `gcs` (`x-ga-gcs`, decoded into `ad_storage` and `analytics_storage`) and `gcd` (`x-ga-gcd`, passed raw). It is empty when the hit carries neither, for example a Data Tag hit that does not forward consent.
+- `metadata.client_name` names the client that claimed the request (for example `GA4` or `Data Client`).
+- The full snapshot is the parsed event, not the browser dataLayer. It never includes `user_data`, `ip_override`, `user_agent` or `x-fb-ud-*` keys; add more under **Also exclude from snapshot**.
 - The data-event request settles the tag (`gtmOnSuccess` / `gtmOnFailure`). The tag-status request only logs a failure.
-- The page URL comes from the event's `page_location`. The full snapshot is the parsed event, not the browser dataLayer.
+- The page URL comes from the event's `page_location`.
+- Server tags usually report `success` or `failure` from the vendor's HTTP response (Meta CAPI, GA4, Google Ads), so a server status is closer to "the platform accepted it" than a web status. It still depends on each tag's template.
 
 Set this tag to fire **once per event**, and make its trigger cover every event a monitored server tag fires on. A monitored tag that fires on an event this tag does not fire on is missing, not failed.
 
 ## Tests
 
-The web template has 21 unit tests. The server template has 14. After importing, open the template editor > **Tests** tab > click **Run Tests**.
+The web template has 21 unit tests. The server template has 20. After importing, open the template editor > **Tests** tab > click **Run Tests**.
 
 ## Support
 

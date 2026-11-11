@@ -90,7 +90,21 @@ ___TEMPLATE_PARAMETERS___
         "checkboxText": "Capture full event data snapshot",
         "simpleValueType": true,
         "defaultValue": false,
-        "help": "Include the complete parsed event object in each payload. Useful for debugging but increases the POST body size. The event is still sent — this template posts JSON, so there is no URL length limit."
+        "help": "Include the parsed event object in each payload, without personal data: user_data, ip_override, user_agent and x-fb-ud-* keys are always removed. Useful for debugging but increases the POST body size. The event is still sent — this template posts JSON, so there is no URL length limit."
+      },
+      {
+        "type": "TEXT",
+        "name": "snapshotExcludedKeys",
+        "displayName": "Also exclude from snapshot (comma-separated keys)",
+        "simpleValueType": true,
+        "help": "Event data keys to remove from the full snapshot, in addition to user_data, ip_override, user_agent and x-fb-ud-*. e.g. email,phone_number",
+        "enablingConditions": [
+          {
+            "paramName": "captureFullEvent",
+            "paramValue": true,
+            "type": "EQUALS"
+          }
+        ]
       },
       {
         "type": "CHECKBOX",
@@ -122,7 +136,31 @@ ___TEMPLATE_PARAMETERS___
         "checkboxText": "Report status of monitored tags",
         "simpleValueType": true,
         "defaultValue": false,
-        "help": "After each event this tag fires on, send the status (success, failure, exception, timeout) and execution time of the tags that fired for that event and carry the metadata monitor = true (Advanced Settings > Additional Tag Metadata; check Include Tag Name with key name to report tag names). Runs on every event this tag fires on, regardless of When to Send Data. A failed tag-status request does not fail this tag."
+        "help": "After each event this tag fires on, send status totals for every tag that fired, plus the status, execution time and metadata of the tags that carry monitor = true (Advanced Settings > Additional Tag Metadata; check Include Tag Name with key name to report tag names). Unmonitored tags that did not succeed are listed by id. Runs on every event this tag fires on, regardless of When to Send Data. A failed tag-status request does not fail this tag."
+      }
+    ]
+  },
+  {
+    "type": "GROUP",
+    "name": "joinIds",
+    "displayName": "Join IDs",
+    "groupStyle": "ZIPPY_CLOSED",
+    "subParams": [
+      {
+        "type": "TEXT",
+        "name": "pageLoadIdKey",
+        "displayName": "Page load ID event key",
+        "simpleValueType": true,
+        "defaultValue": "page_load_id",
+        "help": "Event data key that carries the web page load id, forwarded as an event parameter by the web container. When missing, one id is minted for this request."
+      },
+      {
+        "type": "TEXT",
+        "name": "eventIdKey",
+        "displayName": "Event ID event key",
+        "simpleValueType": true,
+        "defaultValue": "event_id",
+        "help": "Event data key that carries the web event id. If event_id holds the Meta deduplication id in your setup, forward gtm.uniqueEventId under another key (e.g. adwize_event_id) and enter it here. When missing, one id is minted for this request."
       }
     ]
   }
@@ -134,10 +172,12 @@ ___SANDBOXED_JS_FOR_SERVER___
 const addEventCallback = require('addEventCallback');
 const generateRandom = require('generateRandom');
 const getAllEventData = require('getAllEventData');
+const getClientName = require('getClientName');
 const getEventData = require('getEventData');
 const getContainerVersion = require('getContainerVersion');
 const getTimestampMillis = require('getTimestampMillis');
 const JSON = require('JSON');
+const Object = require('Object');
 const sendHttpRequest = require('sendHttpRequest');
 const log = require('logToConsole');
 
@@ -153,9 +193,18 @@ const captureFullEvent = data.captureFullEvent || false;
 const captureEcommerceItems = data.captureEcommerceItems !== false;
 const debugMode = data.debugMode || false;
 const monitorTags = data.monitorTags || false;
+const pageLoadIdKey = data.pageLoadIdKey || 'page_load_id';
+const eventIdKey = data.eventIdKey || 'event_id';
+const snapshotExcludedKeys = data.snapshotExcludedKeys || '';
 
 const MONITOR_METADATA_KEY = 'monitor';
 const TAG_STATUS_EVENT_TYPE = 'adwize.tag_status';
+const TAG_STATUSES = ['success', 'failure', 'exception', 'timeout'];
+const BASE_TAG_KEYS = ['id', 'name', 'status', 'execution_time'];
+
+// Personal data the full snapshot never carries.
+const DEFAULT_EXCLUDED_KEYS = ['user_data', 'ip_override', 'user_agent'];
+const EXCLUDED_KEY_PREFIXES = ['x-fb-ud-'];
 
 const ecommerceEvents = [
   'purchase', 'transaction', 'add_to_cart', 'remove_from_cart',
@@ -194,20 +243,95 @@ const shouldCaptureEvent = function(eventName) {
   return false;
 };
 
-const getMonitoredTags = function(tags) {
-  const monitored = [];
-  if (!tags) return monitored;
-  for (var i = 0; i < tags.length; i++) {
-    if (tags[i][MONITOR_METADATA_KEY] === 'true') {
-      monitored.push({
-        id: tags[i].id,
-        name: tags[i].name,
-        status: tags[i].status,
-        execution_time: tags[i].executionTime
-      });
+// Consent travels in the GA4 hit: x-ga-gcs = G1<ad_storage><analytics_storage>
+// (1 granted, 0 denied); x-ga-gcd encodes all four types and is passed raw.
+const getConsentState = function() {
+  const consent = {};
+  const gcs = getEventData('x-ga-gcs');
+  const gcd = getEventData('x-ga-gcd');
+  if (gcs) {
+    consent.gcs = gcs;
+    if (gcs.length === 4 && gcs.substring(0, 2) === 'G1') {
+      consent.ad_storage = gcs.charAt(2) === '1';
+      consent.analytics_storage = gcs.charAt(3) === '1';
     }
   }
-  return monitored;
+  if (gcd) consent.gcd = gcd;
+  return consent;
+};
+
+const isExcludedKey = function(key, extraKeys) {
+  if (DEFAULT_EXCLUDED_KEYS.indexOf(key) !== -1 || extraKeys.indexOf(key) !== -1) return true;
+  for (var i = 0; i < EXCLUDED_KEY_PREFIXES.length; i++) {
+    if (key.indexOf(EXCLUDED_KEY_PREFIXES[i]) === 0) return true;
+  }
+  return false;
+};
+
+const getEventSnapshot = function() {
+  const extraKeys = [];
+  const configured = snapshotExcludedKeys.split(',');
+  for (var i = 0; i < configured.length; i++) {
+    if (configured[i].trim()) extraKeys.push(configured[i].trim());
+  }
+  const all = getAllEventData();
+  const snapshot = {};
+  const keys = Object.keys(all);
+  for (var j = 0; j < keys.length; j++) {
+    if (!isExcludedKey(keys[j], extraKeys)) snapshot[keys[j]] = all[keys[j]];
+  }
+  return snapshot;
+};
+
+// A monitored tag with every metadata key it carries, except the monitor flag.
+const toMonitoredTag = function(tag) {
+  const entry = {
+    id: tag.id,
+    name: tag.name,
+    status: tag.status,
+    execution_time: tag.executionTime
+  };
+  const keys = Object.keys(tag);
+  for (var i = 0; i < keys.length; i++) {
+    const key = keys[i];
+    if (key === MONITOR_METADATA_KEY || key === 'executionTime' || BASE_TAG_KEYS.indexOf(key) !== -1) continue;
+    entry[key] = tag[key];
+  }
+  return entry;
+};
+
+// Totals for every tag that fired, full detail for monitored tags (failures
+// first), and the id/status of unmonitored tags that did not succeed.
+const summarizeTags = function(tags) {
+  const summary = {total: 0, success: 0, failure: 0, exception: 0, timeout: 0};
+  const failedMonitored = [];
+  const succeededMonitored = [];
+  const unmonitoredIssues = [];
+  if (!tags) tags = [];
+  for (var i = 0; i < tags.length; i++) {
+    const tag = tags[i];
+    summary.total++;
+    if (TAG_STATUSES.indexOf(tag.status) !== -1) summary[tag.status]++;
+
+    if (tag[MONITOR_METADATA_KEY] === 'true') {
+      if (tag.status === 'success') {
+        succeededMonitored.push(toMonitoredTag(tag));
+      } else {
+        failedMonitored.push(toMonitoredTag(tag));
+      }
+    } else if (tag.status !== 'success') {
+      const issue = {id: tag.id, status: tag.status};
+      if (tag.name) issue.name = tag.name;
+      unmonitoredIssues.push(issue);
+    }
+  }
+  for (var j = 0; j < succeededMonitored.length; j++) failedMonitored.push(succeededMonitored[j]);
+  return {
+    event: eventName,
+    summary: summary,
+    tags: failedMonitored,
+    unmonitored_issues: unmonitoredIssues
+  };
 };
 
 // =============================================================================
@@ -217,15 +341,16 @@ const getMonitoredTags = function(tags) {
 const eventName = getEventData('event_name');
 const cv = getContainerVersion();
 const pageUrl = getEventData('page_location');
+const clientName = getClientName();
 
 // One server request is one event. Prefer ids the incoming hit already carries
-// (forwarded page_load_id / event_id). Otherwise mint one id for this request
-// so the captured event and its tag statuses still join. Do not store it in
-// templateDataStorage: that store is shared by every visitor on this process,
-// unlike web templateStorage, which lasts for a single page.
+// (forwarded by the web container under the configured keys). Otherwise mint
+// one id for this request so the captured event and its tag statuses still
+// join. Do not store it in templateDataStorage: that store is shared by every
+// visitor on this process, unlike web templateStorage, which lasts for a page.
 const requestId = getTimestampMillis() + '-' + generateRandom(0, 2147483647);
-const eventId = getEventData('event_id') || requestId;
-const pageLoadId = getEventData('page_load_id') || requestId;
+const eventId = getEventData(eventIdKey) || requestId;
+const pageLoadId = getEventData(pageLoadIdKey) || requestId;
 
 const requestOptions = {
   method: 'POST',
@@ -236,21 +361,23 @@ const requestOptions = {
   timeout: 5000
 };
 
-const sendEvent = function(type, eventDataObj, settleTag) {
+const sendEvent = function(type, eventDataObj, containerId, settleTag) {
   var payload = {
     source: 'sgtm',
-    source_id: cv.containerId,
+    source_id: containerId,
     events: [{
       type: type,
       timestamp: getTimestampMillis(),
       data: eventDataObj,
       metadata: {
-        container_id: cv.containerId,
+        container_id: containerId,
         container_version: cv.version,
         environment: cv.environmentName || 'live',
+        client_name: clientName,
         page_url: pageUrl,
         page_load_id: pageLoadId,
-        event_id: eventId
+        event_id: eventId,
+        consent: getConsentState()
       }
     }]
   };
@@ -270,12 +397,8 @@ const sendEvent = function(type, eventDataObj, settleTag) {
 
 if (monitorTags) {
   addEventCallback(function(containerId, eventData) {
-    const monitored = getMonitoredTags(eventData && eventData.tags);
-    if (monitored.length === 0) {
-      debugLog('No monitored tags fired for event: ' + eventName);
-      return;
-    }
-    sendEvent(TAG_STATUS_EVENT_TYPE, {event: eventName, tags: monitored}, false);
+    debugLog('Tags that fired for ' + eventName + ':', eventData && eventData.tags);
+    sendEvent(TAG_STATUS_EVENT_TYPE, summarizeTags(eventData && eventData.tags), containerId || cv.containerId, false);
   });
 }
 
@@ -284,8 +407,6 @@ if (!shouldCaptureEvent(eventName)) {
   data.gtmOnSuccess();
   return;
 }
-
-var fullEventData = captureFullEvent ? getAllEventData() : null;
 
 var eventDataObj = {
   event: eventName
@@ -304,11 +425,11 @@ if (transactionId) eventDataObj.transaction_id = transactionId;
 if (value !== undefined) eventDataObj.value = value;
 if (currency) eventDataObj.currency = currency;
 
-if (fullEventData) {
-  eventDataObj.eventData = fullEventData;
+if (captureFullEvent) {
+  eventDataObj.eventData = getEventSnapshot();
 }
 
-sendEvent(eventName, eventDataObj, true);
+sendEvent(eventName, eventDataObj, cv.containerId, true);
 
 
 ___SERVER_PERMISSIONS___
@@ -619,10 +740,11 @@ scenarios:
     assertThat(bodies[1]).contains('GA4Purchase');
     assertThat(bodies[1]).contains('failure');
     assertThat(bodies[1]).doesNotContain('Floodlight');
-- name: "Tag monitoring sends nothing when no monitored tag fired"
+- name: "Tag monitoring sends totals when no monitored tag fired"
   code: |-
     var callback;
     var bodies = [];
+    var JSON = require('JSON');
     mock('getEventData', function(key) {
       if (key === 'event_name') return 'purchase';
       return undefined;
@@ -642,8 +764,11 @@ scenarios:
       {id: '13', name: 'Floodlight', status: 'success', executionTime: 300, monitor: 'false'}
     ]});
 
-    assertThat(bodies.length).isEqualTo(1);
-    assertThat(bodies[0]).doesNotContain('adwize.tag_status');
+    assertThat(bodies.length).isEqualTo(2);
+    var data = JSON.parse(bodies[1]).events[0].data;
+    assertThat(data.summary).isEqualTo({total: 1, success: 1, failure: 0, exception: 0, timeout: 0});
+    assertThat(data.tags.length).isEqualTo(0);
+    assertThat(data.unmonitored_issues.length).isEqualTo(0);
 - name: "Tag monitoring runs on events skipped by the capture list"
   code: |-
     var callback;
@@ -696,7 +821,172 @@ scenarios:
     assertThat(capturedBody).contains('page-load-99');
     assertThat(capturedBody).contains('evt-42');
     assertThat(capturedBody).doesNotContain('1700000000000-7');
+- name: "Tag status counts every tag, forwards metadata and lists unmonitored issues"
+  code: |-
+    var callback;
+    var bodies = [];
+    var JSON = require('JSON');
+    mock('getEventData', function(key) {
+      if (key === 'event_name') return 'purchase';
+      return undefined;
+    });
+    mock('getContainerVersion', function() {
+      return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
+    });
+    mock('getTimestampMillis', function() { return 1700000000000; });
+    mock('addEventCallback', function(cb) { callback = cb; });
+    mock('sendHttpRequest', function(url, callback, options, body) {
+      bodies.push(body);
+      callback(200, {}, '');
+    });
 
+    runCode({apiKey: 'ts_live_test123', triggerMode: 'custom', customEvents: 'add_to_cart', debugMode: false, captureFullEvent: false, captureEcommerceItems: true, monitorTags: true});
+    callback('GTM-TEST1', {tags: [
+      {id: '1', name: 'GA4 - sGTM', status: 'success', executionTime: 85, monitor: 'true', platform: 'ga4'},
+      {id: '2', name: 'Meta CAPI - Purchase', status: 'failure', executionTime: 40, monitor: 'true', platform: 'meta'},
+      {id: '3', name: 'Klaviyo', status: 'exception', executionTime: 5},
+      {id: '4', status: 'timeout', executionTime: 5000},
+      {id: '5', name: 'Conversion Linker', status: 'success', executionTime: 1}
+    ]});
+
+    var data = JSON.parse(bodies[0]).events[0].data;
+    assertThat(data.event).isEqualTo('purchase');
+    assertThat(data.summary).isEqualTo({total: 5, success: 2, failure: 1, exception: 1, timeout: 1});
+    assertThat(data.tags).isEqualTo([
+      {id: '2', name: 'Meta CAPI - Purchase', status: 'failure', execution_time: 40, platform: 'meta'},
+      {id: '1', name: 'GA4 - sGTM', status: 'success', execution_time: 85, platform: 'ga4'}
+    ]);
+    assertThat(data.unmonitored_issues).isEqualTo([
+      {id: '3', status: 'exception', name: 'Klaviyo'},
+      {id: '4', status: 'timeout'}
+    ]);
+- name: "Tag status uses the container id passed to the callback"
+  code: |-
+    var callback;
+    var bodies = [];
+    var JSON = require('JSON');
+    mock('getEventData', function(key) {
+      if (key === 'event_name') return 'purchase';
+      return undefined;
+    });
+    mock('getContainerVersion', function() {
+      return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
+    });
+    mock('getTimestampMillis', function() { return 1700000000000; });
+    mock('addEventCallback', function(cb) { callback = cb; });
+    mock('sendHttpRequest', function(url, callback, options, body) {
+      bodies.push(body);
+      callback(200, {}, '');
+    });
+
+    runCode({apiKey: 'ts_live_test123', triggerMode: 'custom', customEvents: 'add_to_cart', debugMode: false, captureFullEvent: false, captureEcommerceItems: true, monitorTags: true});
+    callback('GTM-OTHER', {tags: [{id: '1', status: 'success', executionTime: 10, monitor: 'true'}]});
+
+    var payload = JSON.parse(bodies[0]);
+    assertThat(payload.source_id).isEqualTo('GTM-OTHER');
+    assertThat(payload.events[0].metadata.container_id).isEqualTo('GTM-OTHER');
+- name: "Payloads carry consent from the GA4 hit and the client name"
+  code: |-
+    var capturedBody = '';
+    var JSON = require('JSON');
+    mock('getEventData', function(key) {
+      if (key === 'event_name') return 'purchase';
+      if (key === 'x-ga-gcs') return 'G101';
+      if (key === 'x-ga-gcd') return '13r3r3r2r5l1';
+      return undefined;
+    });
+    mock('getContainerVersion', function() {
+      return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
+    });
+    mock('getTimestampMillis', function() { return 1700000000000; });
+    mock('getClientName', function() { return 'GA4'; });
+    mock('sendHttpRequest', function(url, callback, options, body) {
+      capturedBody = body;
+      callback(200, {}, '');
+    });
+
+    runCode({apiKey: 'ts_live_test123', triggerMode: 'all', debugMode: false, captureFullEvent: false, captureEcommerceItems: true});
+
+    var metadata = JSON.parse(capturedBody).events[0].metadata;
+    assertThat(metadata.consent).isEqualTo({gcs: 'G101', ad_storage: false, analytics_storage: true, gcd: '13r3r3r2r5l1'});
+    assertThat(metadata.client_name).isEqualTo('GA4');
+- name: "Consent is empty when the hit carries none"
+  code: |-
+    var capturedBody = '';
+    var JSON = require('JSON');
+    mock('getEventData', function(key) {
+      if (key === 'event_name') return 'purchase';
+      return undefined;
+    });
+    mock('getContainerVersion', function() {
+      return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
+    });
+    mock('getTimestampMillis', function() { return 1700000000000; });
+    mock('sendHttpRequest', function(url, callback, options, body) {
+      capturedBody = body;
+      callback(200, {}, '');
+    });
+
+    runCode({apiKey: 'ts_live_test123', triggerMode: 'all', debugMode: false, captureFullEvent: false, captureEcommerceItems: true});
+
+    assertThat(JSON.parse(capturedBody).events[0].metadata.consent).isEqualTo({});
+- name: "Full snapshot leaves out personal data"
+  code: |-
+    var capturedBody = '';
+    var JSON = require('JSON');
+    mock('getEventData', function(key) {
+      if (key === 'event_name') return 'purchase';
+      return undefined;
+    });
+    mock('getAllEventData', function() {
+      return {
+        event_name: 'purchase',
+        value: 50,
+        user_data: {email_address: 'a@example.com'},
+        ip_override: '203.0.113.7',
+        user_agent: 'Mozilla/5.0',
+        'x-fb-ud-em': 'hash',
+        phone_number: '+15555550100'
+      };
+    });
+    mock('getContainerVersion', function() {
+      return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
+    });
+    mock('getTimestampMillis', function() { return 1700000000000; });
+    mock('sendHttpRequest', function(url, callback, options, body) {
+      capturedBody = body;
+      callback(200, {}, '');
+    });
+
+    runCode({apiKey: 'ts_live_test123', triggerMode: 'all', debugMode: false, captureFullEvent: true, snapshotExcludedKeys: 'phone_number', captureEcommerceItems: true});
+
+    var snapshot = JSON.parse(capturedBody).events[0].data.eventData;
+    assertThat(snapshot).isEqualTo({event_name: 'purchase', value: 50});
+- name: "Join ids are read from the configured keys"
+  code: |-
+    var capturedBody = '';
+    var JSON = require('JSON');
+    mock('getEventData', function(key) {
+      if (key === 'event_name') return 'purchase';
+      if (key === 'event_id') return 'meta-dedup-1';
+      if (key === 'adwize_event_id') return '42';
+      if (key === 'adwize_plid') return '1700000000000-9';
+      return undefined;
+    });
+    mock('getContainerVersion', function() {
+      return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
+    });
+    mock('getTimestampMillis', function() { return 1700000000000; });
+    mock('sendHttpRequest', function(url, callback, options, body) {
+      capturedBody = body;
+      callback(200, {}, '');
+    });
+
+    runCode({apiKey: 'ts_live_test123', triggerMode: 'all', debugMode: false, captureFullEvent: false, captureEcommerceItems: true, eventIdKey: 'adwize_event_id', pageLoadIdKey: 'adwize_plid'});
+
+    var metadata = JSON.parse(capturedBody).events[0].metadata;
+    assertThat(metadata.event_id).isEqualTo('42');
+    assertThat(metadata.page_load_id).isEqualTo('1700000000000-9');
 
 ___NOTES___
 
@@ -705,20 +995,22 @@ Adwize Data Quality Monitor GTM Tag Template (Server-Side)
 
 This tag captures events processed by a server-side Google Tag Manager
 container (event name, optional e-commerce data, optional full event
-snapshot, and container metadata) and forwards them to the Adwize API
-for quality monitoring and alerting.
+snapshot without personal data, container metadata, consent from the
+GA4 hit and client name) and forwards them to the Adwize API for
+quality monitoring and alerting.
 
 Optional tag monitoring (Tag Monitoring > Report status of
-monitored tags) also reports the status and execution time of the
-server tags you mark with tag metadata monitor = true, for each
-event this tag fires on.
+monitored tags) reports, for each event this tag fires on: status
+totals for every tag that fired; status, execution time and metadata
+of the server tags marked with metadata monitor = true; and the id of
+unmonitored tags that did not succeed.
 
 Setup:
 1. Import this template into your server-side GTM container
    (Templates > Tag Templates > New > Import)
 2. Create a new tag using this template (Tags > New > select "Adwize")
 3. Enter your API key from the Adwize dashboard (Settings > API Keys)
-4. Add a trigger (typically "All Events" on the server container)
+4. Add the triggers for the events you want to monitor
 5. Preview to verify events are forwarded
 6. Publish your container
 
@@ -731,8 +1023,10 @@ Differences vs. the web (client-side) template:
   page URL is read from the incoming event's page_location property
 - No GET URL length limit, and no payload-size skip. Large snapshots
   are still posted.
-- page_load_id and event_id are read from the incoming event when the
-  web container forwarded them. Otherwise one id is minted for this
+- page_load_id and event_id are read from the incoming event, under
+  the keys set in Join IDs, when the web container forwarded them.
+  If event_id carries the Meta deduplication id in your setup, forward
+  gtm.uniqueEventId under another key and set it in Join IDs. Otherwise one id is minted for this
   request. It is not stored in template data storage, because that
   store is shared by every visitor on the server process.
 - The data-event request settles the tag. The tag-status request only
@@ -742,8 +1036,9 @@ Differences vs. the web (client-side) template:
   monitored tag fires on.
 
 Tests:
-The template includes 14 unit tests covering all trigger modes, tag
-monitoring, edge cases, request construction, and failure handling.
+The template includes 20 unit tests covering all trigger modes, tag
+monitoring, consent, snapshot filtering, join ids, edge cases, request
+construction, and failure handling.
 After importing, go to the template editor > Tests tab and click
 "Run Tests" to validate.
 
