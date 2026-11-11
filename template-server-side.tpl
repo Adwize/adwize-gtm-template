@@ -35,7 +35,7 @@ ___TEMPLATE_PARAMETERS___
     "name": "apiKey",
     "displayName": "API Key",
     "simpleValueType": true,
-    "help": "Your Adwize API key. Find it in the Adwize dashboard under Settings → API Keys. Sent as the X-Adwize-Api-Key header, not in the URL.",
+    "help": "Your Adwize API key. Find it in the Adwize dashboard under Settings → API Keys. Sent as the X-API-Key header on POST /api/v1/events, not in the URL.",
     "valueValidators": [
       {
         "type": "NON_EMPTY"
@@ -185,7 +185,7 @@ const log = require('logToConsole');
 // CONFIGURATION
 // =============================================================================
 
-const ENDPOINT = 'https://api.getadwize.com/api/v1/events/collect';
+const ENDPOINT = 'https://api.getadwize.com/api/v1/events';
 const apiKey = data.apiKey;
 const triggerMode = data.triggerMode || 'all';
 const customEvents = data.customEvents || '';
@@ -221,6 +221,12 @@ const debugLog = function(message, payload) {
   if (debugMode) {
     log('[Adwize] ' + message, payload);
   }
+};
+
+const httpPageUrl = function(url) {
+  if (typeof url !== 'string') return '';
+  if (url.indexOf('https://') === 0 || url.indexOf('http://') === 0) return url;
+  return '';
 };
 
 const shouldCaptureEvent = function(eventName) {
@@ -352,22 +358,25 @@ const requestId = getTimestampMillis() + '-' + generateRandom(0, 2147483647);
 const eventId = getEventData(eventIdKey) || requestId;
 const pageLoadId = getEventData(pageLoadIdKey) || requestId;
 
+const requestHeaders = {
+  'Content-Type': 'application/json',
+  'X-API-Key': apiKey
+};
+const referer = httpPageUrl(pageUrl);
+if (referer) requestHeaders['Referer'] = referer;
+
 const requestOptions = {
   method: 'POST',
-  headers: {
-    'Content-Type': 'application/json',
-    'X-Adwize-Api-Key': apiKey
-  },
+  headers: requestHeaders,
   timeout: 5000
 };
 
 const sendEvent = function(type, eventDataObj, containerId, settleTag) {
   var payload = {
-    source: 'sgtm',
+    source: 'gtm',
     source_id: containerId,
     events: [{
       type: type,
-      timestamp: getTimestampMillis(),
       data: eventDataObj,
       metadata: {
         container_id: containerId,
@@ -621,8 +630,10 @@ scenarios:
 - name: "Request headers contain API key"
   code: |-
     var capturedOptions = null;
+    var capturedUrl = '';
     mock('getEventData', function(key) {
       if (key === 'event_name') return 'page_view';
+      if (key === 'page_location') return 'https://example.com/checkout';
       return undefined;
     });
     mock('getContainerVersion', function() {
@@ -630,16 +641,20 @@ scenarios:
     });
     mock('getTimestampMillis', function() { return 1700000000000; });
     mock('sendHttpRequest', function(url, callback, options, body) {
+      capturedUrl = url;
       capturedOptions = options;
       callback(200, {}, '');
     });
 
     runCode({apiKey: 'ts_live_testkey', triggerMode: 'all', debugMode: false, captureFullEvent: false, captureEcommerceItems: true});
 
-    assertThat(capturedOptions.headers['X-Adwize-Api-Key']).isEqualTo('ts_live_testkey');
+    assertThat(capturedUrl).isEqualTo('https://api.getadwize.com/api/v1/events');
+    assertThat(capturedOptions.headers['X-API-Key']).isEqualTo('ts_live_testkey');
+    assertThat(capturedOptions.headers['Referer']).isEqualTo('https://example.com/checkout');
 - name: "Request body is valid JSON containing the event name"
   code: |-
     var capturedBody = '';
+    var capturedOptions = null;
     mock('getEventData', function(key) {
       if (key === 'event_name') return 'purchase';
       return undefined;
@@ -650,13 +665,17 @@ scenarios:
     mock('getTimestampMillis', function() { return 1700000000000; });
     mock('sendHttpRequest', function(url, callback, options, body) {
       capturedBody = body;
+      capturedOptions = options;
       callback(200, {}, '');
     });
 
     runCode({apiKey: 'ts_live_test123', triggerMode: 'all', debugMode: false, captureFullEvent: false, captureEcommerceItems: true});
 
     assertThat(capturedBody).contains('purchase');
-    assertThat(capturedBody).contains('sgtm');
+    assertThat(capturedBody).contains('"source":"gtm"');
+    assertThat(capturedBody).doesNotContain('"timestamp"');
+    assertThat(capturedBody).doesNotContain('sgtm');
+    assertThat(capturedOptions.headers['Referer']).isUndefined();
 - name: "Non-2xx response triggers gtmOnFailure"
   code: |-
     mock('getEventData', function(key) {
@@ -1016,8 +1035,10 @@ Setup:
 
 Differences vs. the web (client-side) template:
 - Uses getEventData/getAllEventData instead of copyFromDataLayer
-- Uses sendHttpRequest (POST with JSON body + API key header) instead
-  of sendPixel (GET with query-string payload)
+- POSTs JSON to /api/v1/events with the X-API-Key header and source "gtm".
+  timestamp is omitted; the API records when the request arrives. The web
+  template uses sendPixel (GET) instead. An http(s) page_location is also
+  sent as Referer for the allowed-domain check.
 - Runs in a SERVER container context
 - No access to the browser dataLayer or the current page URL DOM; the
   page URL is read from the incoming event's page_location property
