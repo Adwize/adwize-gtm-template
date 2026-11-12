@@ -10,7 +10,8 @@ Optionally, it also reports whether the GTM tags you care about (GA4, Ads, etc.)
 - Collects e-commerce data, transaction details, and container metadata
 - Sends a lightweight pixel request (`GET`) to the Adwize API
 - Supports filtering by all events, e-commerce only, or a custom event list
-- Optionally reports the status (`success`, `failure`, `exception`, `timeout`) and execution time of tags you mark with tag metadata
+- Records consent state (`ad_storage`, `analytics_storage`, `ad_user_data`, `ad_personalization`) with each payload
+- Optionally reports tag status (`success`, `failure`, `exception`, `timeout`): totals for every tag, full detail for tags you mark with tag metadata
 
 ## Setup
 
@@ -18,7 +19,7 @@ Optionally, it also reports whether the GTM tags you care about (GA4, Ads, etc.)
 2. **Create a tag**: **Tags** > **New** > choose **Adwize - Data collection monitoring**
 3. **Paste your API key** from the Adwize dashboard (**Settings > API Keys**)
 4. **Choose a trigger mode**: All Events (recommended), E-commerce Only, or Custom Event List
-5. **Add a trigger**: select **All Pages**
+5. **Add triggers** for the events you want to monitor, for example a Custom Event trigger on your conversion events (`^(purchase|add_to_cart|begin_checkout)$`, regex matching). The tag only sees the events its triggers fire on.
 6. **Preview** to verify events are sent, then **Publish**
 
 > **Security note:** The collect request is a GET pixel, so the API key travels in the query string (`?k=`). That can appear in browser history, CDN/proxy/WAF logs, and some error-page referrers. Prefer network controls, rotate the key if logs are shared, and treat this as write-ingest credentials — not a dashboard login.
@@ -33,11 +34,11 @@ Optionally, it also reports whether the GTM tags you care about (GA4, Ads, etc.)
 | **Capture full dataLayer** | Include the entire dataLayer snapshot in each event (Advanced). Large snapshots can exceed GET URL limits — see below. |
 | **Capture e-commerce items** | Include product/item arrays for e-commerce events (default: on) |
 | **Enable debug logging** | Log events to browser console (Advanced, disable in production) |
-| **Report status of monitored tags** | Send the status of tags with metadata `monitor` = `true` after each event this tag fires on (Tag Monitoring, default: off) |
+| **Report status of monitored tags** | After each event this tag fires on, send status totals for every tag plus full detail for tags with metadata `monitor` = `true` (Tag Monitoring, default: off) |
 
 ## Tag monitoring (optional)
 
-Uses GTM's [`addEventCallback`](https://developers.google.com/tag-platform/tag-manager/templates/monitoring) API. At the end of each event this tag fires on, it reads the tags that fired for that event and sends one `adwize.tag_status` event listing the monitored ones.
+Uses GTM's [`addEventCallback`](https://developers.google.com/tag-platform/tag-manager/templates/monitoring) API. At the end of each event this tag fires on, it reads the tags that fired for that event and sends an `adwize.tag_status` event.
 
 1. On each tag to monitor: **Advanced Settings** > **Additional Tag Metadata** > **Add Metadata**, key `monitor`, value `true`. Check **Include Tag Name** with key `name` to report tag names.
 2. In the Adwize tag: **Tag Monitoring** > check **Report status of monitored tags**.
@@ -46,17 +47,55 @@ Uses GTM's [`addEventCallback`](https://developers.google.com/tag-platform/tag-m
 
 Tag monitoring ignores **When to Send Data**: the trigger alone decides which events are monitored. Both payloads carry `metadata.page_load_id` (random, shared by every event of a page load) and `metadata.event_id` (GTM's `gtm.uniqueEventId`, which restarts on each page load). Together they join a dataLayer event with its tag statuses.
 
-Each monitored tag is reported as:
+Each `adwize.tag_status` event carries:
 
 ```json
-{"id": "12", "name": "GA4 - purchase", "status": "success", "execution_time": 120}
+{
+  "event": "purchase",
+  "part": {"index": 1, "count": 1},
+  "summary": {"total": 5, "success": 2, "failure": 1, "exception": 1, "timeout": 1},
+  "tags": [
+    {"id": "12", "name": "GA4 - purchase", "status": "failure", "execution_time": 120, "platform": "ga4"}
+  ],
+  "unmonitored_issues": [
+    {"id": "31", "status": "exception", "name": "Meta - Purchase"}
+  ]
+}
 ```
 
-`success` means the tag reported completion, not that the vendor received or accepted the hit.
+- `summary` counts every tag that fired for the event, monitored or not.
+- `tags` lists the monitored tags, with every metadata key except `monitor` (for example `platform`, `priority`).
+- `unmonitored_issues` lists tags without `monitor = true` whose status is not `success` (id, status, and name when Include Tag Name is on).
+- A large report is split across several requests that share `page_load_id` and `event_id`. `part` numbers them, and only part 1 carries `summary`. Failed monitored tags are sent first, then unmonitored issues, then successful monitored tags. A single tag too large for one request is sent with `id`, `status` and `execution_time` only (an unmonitored issue with `id` and `status`). No request is ever sent above the cap; anything that still does not fit is skipped and logged to the console.
+
+### What a status means
+
+GTM records the status the tag itself reports.
+
+- **Built-in Google tags and most vendor tags**: `success` means GTM ran the tag without an error, not that the vendor received or accepted the hit.
+- **Custom HTML tags**: report the real result by referencing the built-in **HTML ID** variable and calling GTM back once the request has finished. GTM then waits for the call instead of marking the tag a success when it is injected; with no call before the event timeout, the status is `timeout`. Each tag has to be edited, so do it for the critical ones:
+
+  ```html
+  <script>
+    (function() {
+      var gtm = google_tag_manager['{{Container ID}}'];
+      var img = new Image();
+      img.onload = function() { gtm.onHtmlSuccess({{HTML ID}}); };
+      img.onerror = function() { gtm.onHtmlFailure({{HTML ID}}); };
+      img.src = 'https://vendor.example/pixel?...';
+    })();
+  </script>
+  ```
+
+- **Custom template tags**: the template must call `data.gtmOnSuccess()` / `data.gtmOnFailure()` from its `sendPixel` or `injectScript` callbacks, not right after sending.
+
+### Consent
+
+Both payload types carry `metadata.consent` with `ad_storage`, `analytics_storage`, `ad_user_data` and `ad_personalization` as read by `isConsentGranted` when the payload is built. A consent type that was never set reads as granted.
 
 ## Payload size (GET URL limits)
 
-Events are sent as a `GET` pixel with the JSON payload in the query string. Large payloads — especially with **Capture full dataLayer** enabled, or large e-commerce `items` arrays — can exceed typical browser/proxy URL length limits (~2k–8k characters). When the collect URL exceeds ~1800 characters, the tag skips that `sendPixel` and always logs to the console (`[Adwize] Payload too large…`), even when debug logging is off. Prefer e-commerce-only or a custom event list when possible, and leave full dataLayer capture off unless you need it for debugging. With tag monitoring on, monitor only the tags that matter: each one adds about 100 characters.
+Events are sent as a `GET` pixel with the JSON payload in the query string. Large payloads — especially with **Capture full dataLayer** enabled, or large e-commerce `items` arrays — can exceed typical browser/proxy URL length limits (~2k–8k characters). When the collect URL exceeds ~1800 characters, the tag skips that `sendPixel` and always logs to the console (`[Adwize] Payload too large…`), even when debug logging is off. Prefer e-commerce-only or a custom event list when possible, and leave full dataLayer capture off unless you need it for debugging. Tag status reports are split across several requests instead of skipped (see [Tag monitoring](#tag-monitoring-optional)).
 
 ## How it works
 
@@ -71,8 +110,8 @@ User visits page
 
 With tag monitoring on, at the end of the same event:
   → GTM calls the event callback with the tags that fired
-    → Adwize tag keeps the tags with metadata monitor = true
-      → sendPixel GET request with an adwize.tag_status event
+    → Adwize tag counts every tag and keeps full detail for tags with metadata monitor = true
+      → one or more sendPixel GET requests with an adwize.tag_status event
 ```
 
 ## Server-side template
@@ -83,20 +122,26 @@ What matches the web template:
 
 - The same trigger modes (all events, e-commerce only, custom list)
 - Optional tag monitoring: metadata `monitor` = `true`, one `adwize.tag_status` event per event, including events **When to Send Data** skips
+- Tag status carries `summary` (every tag that fired), `tags` (monitored tags with all their metadata, failures first) and `unmonitored_issues` (unmarked tags that did not succeed)
 - `metadata.page_load_id` and `metadata.event_id` on both payloads, so a captured event joins its tag statuses
 
 What differs, because a server container is not a page:
 
-- The collect call is a `POST` with a JSON body. The API key is the `X-Adwize-Api-Key` header, not a query parameter, so there is no URL-length skip.
-- `page_load_id` and `event_id` are taken from the incoming event when the web container forwarded them. Otherwise the tag mints one id for that request. It does not keep the id in server template storage — that storage is shared by every visitor on the process, so one stored id would join unrelated requests.
+- The server tag POSTs JSON to `/api/v1/events`. The API key is the `X-API-Key` header. `source` is `gtm`, the same value the web template sends. The request omits `timestamp`; the API records when it arrives. When the event has an `http` or `https` `page_location`, that URL is sent as `Referer` so an allowed-domain check can match the site. There is no URL-length limit, and tag status is never split.
+- `page_load_id` and `event_id` are read from the incoming event, under the keys set in **Join IDs** (default `page_load_id` and `event_id`). Otherwise the tag mints one id for that request. It does not keep the id in server template storage — that storage is shared by every visitor on the process, so one stored id would join unrelated requests.
+- **Check `event_id` in your setup.** Many server setups (Stape Data Tag, Meta CAPI deduplication) use `event_id` for the Meta deduplication id, which is not GTM's `gtm.uniqueEventId` and will not join with web payloads. Forward `gtm.uniqueEventId` as an event parameter under another key (for example `adwize_event_id`) and enter that key in **Join IDs**.
+- `metadata.consent` comes from the GA4 hit: `gcs` (`x-ga-gcs`, decoded into `ad_storage` and `analytics_storage`) and `gcd` (`x-ga-gcd`, passed raw). It is empty when the hit carries neither, for example a Data Tag hit that does not forward consent.
+- `metadata.client_name` names the client that claimed the request (for example `GA4` or `Data Client`).
+- The full snapshot is the parsed event, not the browser dataLayer. It never includes `user_data`, `ip_override`, `user_agent` or `x-fb-ud-*` keys; add more under **Also exclude from snapshot**.
 - The data-event request settles the tag (`gtmOnSuccess` / `gtmOnFailure`). The tag-status request only logs a failure.
-- The page URL comes from the event's `page_location`. The full snapshot is the parsed event, not the browser dataLayer.
+- The page URL comes from the event's `page_location`.
+- Server tags usually report `success` or `failure` from the vendor's HTTP response (Meta CAPI, GA4, Google Ads), so a server status is closer to "the platform accepted it" than a web status. It still depends on each tag's template.
 
 Set this tag to fire **once per event**, and make its trigger cover every event a monitored server tag fires on. A monitored tag that fires on an event this tag does not fire on is missing, not failed.
 
 ## Tests
 
-The web template has 13 unit tests. The server template has 14. After importing, open the template editor > **Tests** tab > click **Run Tests**.
+The web template has 21 unit tests. The server template has 20. After importing, open the template editor > **Tests** tab > click **Run Tests**.
 
 ## Support
 
