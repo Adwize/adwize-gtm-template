@@ -185,7 +185,7 @@ const log = require('logToConsole');
 // CONFIGURATION
 // =============================================================================
 
-const ENDPOINT = 'https://api.getadwize.com/api/v1/events';
+const ENDPOINT = 'https://app.getadwize.com/api/v1/events';
 const apiKey = data.apiKey;
 const triggerMode = data.triggerMode || 'all';
 const customEvents = data.customEvents || '';
@@ -521,7 +521,7 @@ ___SERVER_PERMISSIONS___
             "listItem": [
               {
                 "type": 1,
-                "string": "https://api.getadwize.com/*"
+                "string": "https://app.getadwize.com/*"
               }
             ]
           }
@@ -648,7 +648,7 @@ scenarios:
 
     runCode({apiKey: 'ts_live_testkey', triggerMode: 'all', debugMode: false, captureFullEvent: false, captureEcommerceItems: true});
 
-    assertThat(capturedUrl).isEqualTo('https://api.getadwize.com/api/v1/events');
+    assertThat(capturedUrl).isEqualTo('https://app.getadwize.com/api/v1/events');
     assertThat(capturedOptions.headers['X-API-Key']).isEqualTo('ts_live_testkey');
     assertThat(capturedOptions.headers['Referer']).isEqualTo('https://example.com/checkout');
 - name: "Request body is valid JSON containing the event name"
@@ -1035,7 +1035,7 @@ Setup:
 
 Differences vs. the web (client-side) template:
 - Uses getEventData/getAllEventData instead of copyFromDataLayer
-- POSTs JSON to /api/v1/events with the X-API-Key header and source "gtm".
+- POSTs JSON to https://app.getadwize.com/api/v1/events with the X-API-Key header and source "gtm".
   timestamp is omitted; the API records when the request arrives. The web
   template uses sendPixel (GET) instead. An http(s) page_location is also
   sent as Referer for the allowed-domain check.
