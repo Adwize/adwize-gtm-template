@@ -373,7 +373,7 @@ const requestOptions = {
 
 const sendEvent = function(type, eventDataObj, containerId, settleTag) {
   var payload = {
-    source: 'gtm',
+    source: 'sgtm',
     source_id: containerId,
     events: [{
       type: type,
@@ -672,9 +672,8 @@ scenarios:
     runCode({apiKey: 'ts_live_test123', triggerMode: 'all', debugMode: false, captureFullEvent: false, captureEcommerceItems: true});
 
     assertThat(capturedBody).contains('purchase');
-    assertThat(capturedBody).contains('"source":"gtm"');
+    assertThat(capturedBody).contains('"source":"sgtm"');
     assertThat(capturedBody).doesNotContain('"timestamp"');
-    assertThat(capturedBody).doesNotContain('sgtm');
     assertThat(capturedOptions.headers['Referer']).isUndefined();
 - name: "Non-2xx response triggers gtmOnFailure"
   code: |-
@@ -1035,7 +1034,7 @@ Setup:
 
 Differences vs. the web (client-side) template:
 - Uses getEventData/getAllEventData instead of copyFromDataLayer
-- POSTs JSON to https://app.getadwize.com/api/v1/events with the X-API-Key header and source "gtm".
+- POSTs JSON to https://app.getadwize.com/api/v1/events with the X-API-Key header and source "sgtm".
   timestamp is omitted; the API records when the request arrives. The web
   template uses sendPixel (GET) instead. An http(s) page_location is also
   sent as Referer for the allowed-domain check.
