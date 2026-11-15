@@ -139,30 +139,6 @@ ___TEMPLATE_PARAMETERS___
         "help": "After each event this tag fires on, send status totals for every tag that fired, plus the status, execution time and metadata of the tags that carry monitor = true (Advanced Settings > Additional Tag Metadata; check Include Tag Name with key name to report tag names). Unmonitored tags that did not succeed are listed by id. Runs on every event this tag fires on, regardless of When to Send Data. A failed tag-status request does not fail this tag."
       }
     ]
-  },
-  {
-    "type": "GROUP",
-    "name": "joinIds",
-    "displayName": "Join IDs",
-    "groupStyle": "ZIPPY_CLOSED",
-    "subParams": [
-      {
-        "type": "TEXT",
-        "name": "pageLoadIdKey",
-        "displayName": "Page load ID event key",
-        "simpleValueType": true,
-        "defaultValue": "page_load_id",
-        "help": "Event data key that carries the web page load id, forwarded as an event parameter by the web container. When missing, one id is minted for this request."
-      },
-      {
-        "type": "TEXT",
-        "name": "eventIdKey",
-        "displayName": "Event ID event key",
-        "simpleValueType": true,
-        "defaultValue": "event_id",
-        "help": "Event data key that carries the web event id. If event_id holds the Meta deduplication id in your setup, forward gtm.uniqueEventId under another key (e.g. adwize_event_id) and enter it here. When missing, one id is minted for this request."
-      }
-    ]
   }
 ]
 
@@ -170,12 +146,10 @@ ___TEMPLATE_PARAMETERS___
 ___SANDBOXED_JS_FOR_SERVER___
 
 const addEventCallback = require('addEventCallback');
-const generateRandom = require('generateRandom');
 const getAllEventData = require('getAllEventData');
 const getClientName = require('getClientName');
 const getEventData = require('getEventData');
 const getContainerVersion = require('getContainerVersion');
-const getTimestampMillis = require('getTimestampMillis');
 const JSON = require('JSON');
 const Object = require('Object');
 const sendHttpRequest = require('sendHttpRequest');
@@ -185,7 +159,7 @@ const log = require('logToConsole');
 // CONFIGURATION
 // =============================================================================
 
-const ENDPOINT = 'https://api.getadwize.com/api/v1/events';
+const ENDPOINT = 'https://app.getadwize.com/api/v1/events';
 const apiKey = data.apiKey;
 const triggerMode = data.triggerMode || 'all';
 const customEvents = data.customEvents || '';
@@ -193,8 +167,6 @@ const captureFullEvent = data.captureFullEvent || false;
 const captureEcommerceItems = data.captureEcommerceItems !== false;
 const debugMode = data.debugMode || false;
 const monitorTags = data.monitorTags || false;
-const pageLoadIdKey = data.pageLoadIdKey || 'page_load_id';
-const eventIdKey = data.eventIdKey || 'event_id';
 const snapshotExcludedKeys = data.snapshotExcludedKeys || '';
 
 const MONITOR_METADATA_KEY = 'monitor';
@@ -349,15 +321,6 @@ const cv = getContainerVersion();
 const pageUrl = getEventData('page_location');
 const clientName = getClientName();
 
-// One server request is one event. Prefer ids the incoming hit already carries
-// (forwarded by the web container under the configured keys). Otherwise mint
-// one id for this request so the captured event and its tag statuses still
-// join. Do not store it in templateDataStorage: that store is shared by every
-// visitor on this process, unlike web templateStorage, which lasts for a page.
-const requestId = getTimestampMillis() + '-' + generateRandom(0, 2147483647);
-const eventId = getEventData(eventIdKey) || requestId;
-const pageLoadId = getEventData(pageLoadIdKey) || requestId;
-
 const requestHeaders = {
   'Content-Type': 'application/json',
   'X-API-Key': apiKey
@@ -373,7 +336,7 @@ const requestOptions = {
 
 const sendEvent = function(type, eventDataObj, containerId, settleTag) {
   var payload = {
-    source: 'gtm',
+    source: 'sgtm',
     source_id: containerId,
     events: [{
       type: type,
@@ -384,8 +347,6 @@ const sendEvent = function(type, eventDataObj, containerId, settleTag) {
         environment: cv.environmentName || 'live',
         client_name: clientName,
         page_url: pageUrl,
-        page_load_id: pageLoadId,
-        event_id: eventId,
         consent: getConsentState()
       }
     }]
@@ -521,7 +482,7 @@ ___SERVER_PERMISSIONS___
             "listItem": [
               {
                 "type": 1,
-                "string": "https://api.getadwize.com/*"
+                "string": "https://app.getadwize.com/*"
               }
             ]
           }
@@ -547,7 +508,6 @@ scenarios:
     mock('getContainerVersion', function() {
       return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
     });
-    mock('getTimestampMillis', function() { return 1700000000000; });
     mock('sendHttpRequest', function(url, callback) {
       callback(200, {}, '');
     });
@@ -565,8 +525,6 @@ scenarios:
     mock('getContainerVersion', function() {
       return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
     });
-    mock('getTimestampMillis', function() { return 1700000000000; });
-
     runCode({apiKey: 'ts_live_test123', triggerMode: 'ecommerce', debugMode: false, captureFullEvent: false, captureEcommerceItems: true});
 
     assertApi('gtmOnSuccess').wasCalled();
@@ -584,7 +542,6 @@ scenarios:
     mock('getContainerVersion', function() {
       return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
     });
-    mock('getTimestampMillis', function() { return 1700000000000; });
     mock('sendHttpRequest', function(url, callback) {
       callback(200, {}, '');
     });
@@ -602,8 +559,6 @@ scenarios:
     mock('getContainerVersion', function() {
       return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
     });
-    mock('getTimestampMillis', function() { return 1700000000000; });
-
     runCode({apiKey: 'ts_live_test123', triggerMode: 'custom', customEvents: 'purchase,add_to_cart', debugMode: false, captureFullEvent: false, captureEcommerceItems: true});
 
     assertApi('gtmOnSuccess').wasCalled();
@@ -618,7 +573,6 @@ scenarios:
     mock('getContainerVersion', function() {
       return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
     });
-    mock('getTimestampMillis', function() { return 1700000000000; });
     mock('sendHttpRequest', function(url, callback) {
       callback(200, {}, '');
     });
@@ -639,7 +593,6 @@ scenarios:
     mock('getContainerVersion', function() {
       return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
     });
-    mock('getTimestampMillis', function() { return 1700000000000; });
     mock('sendHttpRequest', function(url, callback, options, body) {
       capturedUrl = url;
       capturedOptions = options;
@@ -648,7 +601,7 @@ scenarios:
 
     runCode({apiKey: 'ts_live_testkey', triggerMode: 'all', debugMode: false, captureFullEvent: false, captureEcommerceItems: true});
 
-    assertThat(capturedUrl).isEqualTo('https://api.getadwize.com/api/v1/events');
+    assertThat(capturedUrl).isEqualTo('https://app.getadwize.com/api/v1/events');
     assertThat(capturedOptions.headers['X-API-Key']).isEqualTo('ts_live_testkey');
     assertThat(capturedOptions.headers['Referer']).isEqualTo('https://example.com/checkout');
 - name: "Request body is valid JSON containing the event name"
@@ -662,7 +615,6 @@ scenarios:
     mock('getContainerVersion', function() {
       return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
     });
-    mock('getTimestampMillis', function() { return 1700000000000; });
     mock('sendHttpRequest', function(url, callback, options, body) {
       capturedBody = body;
       capturedOptions = options;
@@ -672,9 +624,8 @@ scenarios:
     runCode({apiKey: 'ts_live_test123', triggerMode: 'all', debugMode: false, captureFullEvent: false, captureEcommerceItems: true});
 
     assertThat(capturedBody).contains('purchase');
-    assertThat(capturedBody).contains('"source":"gtm"');
+    assertThat(capturedBody).contains('"source":"sgtm"');
     assertThat(capturedBody).doesNotContain('"timestamp"');
-    assertThat(capturedBody).doesNotContain('sgtm');
     assertThat(capturedOptions.headers['Referer']).isUndefined();
 - name: "Non-2xx response triggers gtmOnFailure"
   code: |-
@@ -685,7 +636,6 @@ scenarios:
     mock('getContainerVersion', function() {
       return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
     });
-    mock('getTimestampMillis', function() { return 1700000000000; });
     mock('sendHttpRequest', function(url, callback) {
       callback(500, {}, '');
     });
@@ -701,8 +651,6 @@ scenarios:
     mock('getContainerVersion', function() {
       return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
     });
-    mock('getTimestampMillis', function() { return 1700000000000; });
-
     runCode({apiKey: 'ts_live_test123', triggerMode: 'all', debugMode: false, captureFullEvent: false, captureEcommerceItems: true});
 
     assertApi('gtmOnSuccess').wasCalled();
@@ -717,7 +665,6 @@ scenarios:
     mock('getContainerVersion', function() {
       return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
     });
-    mock('getTimestampMillis', function() { return 1700000000000; });
     mock('sendHttpRequest', function(url, callback) {
       callback(200, {}, '');
     });
@@ -738,8 +685,6 @@ scenarios:
     mock('getContainerVersion', function() {
       return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
     });
-    mock('getTimestampMillis', function() { return 1700000000000; });
-    mock('generateRandom', function() { return 7; });
     mock('addEventCallback', function(cb) { callback = cb; });
     mock('sendHttpRequest', function(url, callback, options, body) {
       bodies.push(body);
@@ -771,7 +716,6 @@ scenarios:
     mock('getContainerVersion', function() {
       return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
     });
-    mock('getTimestampMillis', function() { return 1700000000000; });
     mock('addEventCallback', function(cb) { callback = cb; });
     mock('sendHttpRequest', function(url, callback, options, body) {
       bodies.push(body);
@@ -799,7 +743,6 @@ scenarios:
     mock('getContainerVersion', function() {
       return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
     });
-    mock('getTimestampMillis', function() { return 1700000000000; });
     mock('addEventCallback', function(cb) { callback = cb; });
     mock('sendHttpRequest', function(url, callback, options, body) {
       bodies.push(body);
@@ -816,30 +759,6 @@ scenarios:
     assertThat(bodies[0]).contains('adwize.tag_status');
     assertApi('gtmOnSuccess').wasCalled();
     assertApi('gtmOnFailure').wasNotCalled();
-- name: "Incoming page_load_id and event_id are forwarded"
-  code: |-
-    var capturedBody = '';
-    mock('getEventData', function(key) {
-      if (key === 'event_name') return 'purchase';
-      if (key === 'page_load_id') return 'page-load-99';
-      if (key === 'event_id') return 'evt-42';
-      return undefined;
-    });
-    mock('getContainerVersion', function() {
-      return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
-    });
-    mock('getTimestampMillis', function() { return 1700000000000; });
-    mock('generateRandom', function() { return 7; });
-    mock('sendHttpRequest', function(url, callback, options, body) {
-      capturedBody = body;
-      callback(200, {}, '');
-    });
-
-    runCode({apiKey: 'ts_live_test123', triggerMode: 'all', debugMode: false, captureFullEvent: false, captureEcommerceItems: true});
-
-    assertThat(capturedBody).contains('page-load-99');
-    assertThat(capturedBody).contains('evt-42');
-    assertThat(capturedBody).doesNotContain('1700000000000-7');
 - name: "Tag status counts every tag, forwards metadata and lists unmonitored issues"
   code: |-
     var callback;
@@ -852,7 +771,6 @@ scenarios:
     mock('getContainerVersion', function() {
       return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
     });
-    mock('getTimestampMillis', function() { return 1700000000000; });
     mock('addEventCallback', function(cb) { callback = cb; });
     mock('sendHttpRequest', function(url, callback, options, body) {
       bodies.push(body);
@@ -891,7 +809,6 @@ scenarios:
     mock('getContainerVersion', function() {
       return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
     });
-    mock('getTimestampMillis', function() { return 1700000000000; });
     mock('addEventCallback', function(cb) { callback = cb; });
     mock('sendHttpRequest', function(url, callback, options, body) {
       bodies.push(body);
@@ -917,7 +834,6 @@ scenarios:
     mock('getContainerVersion', function() {
       return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
     });
-    mock('getTimestampMillis', function() { return 1700000000000; });
     mock('getClientName', function() { return 'GA4'; });
     mock('sendHttpRequest', function(url, callback, options, body) {
       capturedBody = body;
@@ -940,7 +856,6 @@ scenarios:
     mock('getContainerVersion', function() {
       return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
     });
-    mock('getTimestampMillis', function() { return 1700000000000; });
     mock('sendHttpRequest', function(url, callback, options, body) {
       capturedBody = body;
       callback(200, {}, '');
@@ -971,7 +886,6 @@ scenarios:
     mock('getContainerVersion', function() {
       return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
     });
-    mock('getTimestampMillis', function() { return 1700000000000; });
     mock('sendHttpRequest', function(url, callback, options, body) {
       capturedBody = body;
       callback(200, {}, '');
@@ -981,31 +895,6 @@ scenarios:
 
     var snapshot = JSON.parse(capturedBody).events[0].data.eventData;
     assertThat(snapshot).isEqualTo({event_name: 'purchase', value: 50});
-- name: "Join ids are read from the configured keys"
-  code: |-
-    var capturedBody = '';
-    var JSON = require('JSON');
-    mock('getEventData', function(key) {
-      if (key === 'event_name') return 'purchase';
-      if (key === 'event_id') return 'meta-dedup-1';
-      if (key === 'adwize_event_id') return '42';
-      if (key === 'adwize_plid') return '1700000000000-9';
-      return undefined;
-    });
-    mock('getContainerVersion', function() {
-      return {containerId: 'GTM-TEST1', version: '1', environmentName: 'live'};
-    });
-    mock('getTimestampMillis', function() { return 1700000000000; });
-    mock('sendHttpRequest', function(url, callback, options, body) {
-      capturedBody = body;
-      callback(200, {}, '');
-    });
-
-    runCode({apiKey: 'ts_live_test123', triggerMode: 'all', debugMode: false, captureFullEvent: false, captureEcommerceItems: true, eventIdKey: 'adwize_event_id', pageLoadIdKey: 'adwize_plid'});
-
-    var metadata = JSON.parse(capturedBody).events[0].metadata;
-    assertThat(metadata.event_id).isEqualTo('42');
-    assertThat(metadata.page_load_id).isEqualTo('1700000000000-9');
 
 ___NOTES___
 
@@ -1035,7 +924,7 @@ Setup:
 
 Differences vs. the web (client-side) template:
 - Uses getEventData/getAllEventData instead of copyFromDataLayer
-- POSTs JSON to /api/v1/events with the X-API-Key header and source "gtm".
+- POSTs JSON to https://app.getadwize.com/api/v1/events with the X-API-Key header and source "sgtm".
   timestamp is omitted; the API records when the request arrives. The web
   template uses sendPixel (GET) instead. An http(s) page_location is also
   sent as Referer for the allowed-domain check.
@@ -1044,12 +933,6 @@ Differences vs. the web (client-side) template:
   page URL is read from the incoming event's page_location property
 - No GET URL length limit, and no payload-size skip. Large snapshots
   are still posted.
-- page_load_id and event_id are read from the incoming event, under
-  the keys set in Join IDs, when the web container forwarded them.
-  If event_id carries the Meta deduplication id in your setup, forward
-  gtm.uniqueEventId under another key and set it in Join IDs. Otherwise one id is minted for this
-  request. It is not stored in template data storage, because that
-  store is shared by every visitor on the server process.
 - The data-event request settles the tag. The tag-status request only
   logs a failure, so a monitoring POST cannot fail the tag.
 - Tag monitoring ignores When to Send Data, same as the web template.
@@ -1057,8 +940,8 @@ Differences vs. the web (client-side) template:
   monitored tag fires on.
 
 Tests:
-The template includes 20 unit tests covering all trigger modes, tag
-monitoring, consent, snapshot filtering, join ids, edge cases, request
+The template includes 18 unit tests covering all trigger modes, tag
+monitoring, consent, snapshot filtering, edge cases, request
 construction, and failure handling.
 After importing, go to the template editor > Tests tab and click
 "Run Tests" to validate.
